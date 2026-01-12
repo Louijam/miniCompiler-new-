@@ -5,26 +5,15 @@
 
 namespace ast {
 
-struct Expr {
-    virtual ~Expr() = default;
-};
-
+struct Expr { virtual ~Expr() = default; };
 using ExprPtr = std::unique_ptr<Expr>;
 
-struct IntLiteral : Expr {
-    int value;
-    explicit IntLiteral(int v) : value(v) {}
-};
+struct IntLiteral : Expr { int value; explicit IntLiteral(int v): value(v) {} };
+struct BoolLiteral : Expr { bool value; explicit BoolLiteral(bool v): value(v) {} };
+struct CharLiteral : Expr { char value; explicit CharLiteral(char v): value(v) {} };
+struct StringLiteral : Expr { std::string value; explicit StringLiteral(std::string v): value(std::move(v)) {} };
 
-struct BoolLiteral : Expr {
-    bool value;
-    explicit BoolLiteral(bool v) : value(v) {}
-};
-
-struct VarExpr : Expr {
-    std::string name;
-    explicit VarExpr(std::string n) : name(std::move(n)) {}
-};
+struct VarExpr : Expr { std::string name; explicit VarExpr(std::string n): name(std::move(n)) {} };
 
 struct AssignExpr : Expr {
     std::string name;

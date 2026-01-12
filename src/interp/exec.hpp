@@ -40,16 +40,6 @@ inline bool expect_bool(const Value& v, const char* ctx) {
     throw std::runtime_error(std::string("type error: expected bool in ") + ctx);
 }
 
-inline char expect_char(const Value& v, const char* ctx) {
-    if (auto* pc = std::get_if<char>(&v)) return *pc;
-    throw std::runtime_error(std::string("type error: expected char in ") + ctx);
-}
-
-inline const std::string& expect_string(const Value& v, const char* ctx) {
-    if (auto* ps = std::get_if<std::string>(&v)) return *ps;
-    throw std::runtime_error(std::string("type error: expected string in ") + ctx);
-}
-
 inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions);
 
 inline LValue eval_lvalue(Env& env, const ast::Expr& e) {
@@ -117,6 +107,9 @@ inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions) {
 
     if (auto* i = dynamic_cast<const IntLiteral*>(&e)) return i->value;
     if (auto* b = dynamic_cast<const BoolLiteral*>(&e)) return b->value;
+    if (auto* c = dynamic_cast<const CharLiteral*>(&e)) return c->value;
+    if (auto* s = dynamic_cast<const StringLiteral*>(&e)) return s->value;
+
     if (auto* v = dynamic_cast<const VarExpr*>(&e)) return env.read_value(v->name);
 
     if (auto* a = dynamic_cast<const AssignExpr*>(&e)) {
@@ -133,7 +126,7 @@ inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions) {
     }
 
     if (auto* bin = dynamic_cast<const BinaryExpr*>(&e)) {
-        // && and ||: ONLY bool, with short-circuit
+        // && and || : only bool, short-circuit
         if (bin->op == BinaryExpr::Op::AndAnd) {
             bool lv = expect_bool(eval_expr(env, *bin->left, functions), "operator && (lhs)");
             if (!lv) return false;
@@ -150,7 +143,7 @@ inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions) {
         Value lv = eval_expr(env, *bin->left, functions);
         Value rv = eval_expr(env, *bin->right, functions);
 
-        // arithmetic: ONLY int
+        // arithmetic: only int
         if (bin->op == BinaryExpr::Op::Add || bin->op == BinaryExpr::Op::Sub ||
             bin->op == BinaryExpr::Op::Mul || bin->op == BinaryExpr::Op::Div ||
             bin->op == BinaryExpr::Op::Mod) {
@@ -172,28 +165,28 @@ inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions) {
             }
         }
 
-        // equality: same type; for bool/string only == != ; for int/char also ok
+        // equality: same type; bool/string only == !=; int/char also ok
         if (bin->op == BinaryExpr::Op::Eq || bin->op == BinaryExpr::Op::Ne) {
-            bool is_eq = (bin->op == BinaryExpr::Op::Eq);
+            bool eq = (bin->op == BinaryExpr::Op::Eq);
 
             if (std::holds_alternative<int>(lv) && std::holds_alternative<int>(rv)) {
-                return is_eq ? (std::get<int>(lv) == std::get<int>(rv)) : (std::get<int>(lv) != std::get<int>(rv));
+                return eq ? (std::get<int>(lv) == std::get<int>(rv)) : (std::get<int>(lv) != std::get<int>(rv));
             }
             if (std::holds_alternative<char>(lv) && std::holds_alternative<char>(rv)) {
-                return is_eq ? (std::get<char>(lv) == std::get<char>(rv)) : (std::get<char>(lv) != std::get<char>(rv));
+                return eq ? (std::get<char>(lv) == std::get<char>(rv)) : (std::get<char>(lv) != std::get<char>(rv));
             }
             if (std::holds_alternative<bool>(lv) && std::holds_alternative<bool>(rv)) {
-                return is_eq ? (std::get<bool>(lv) == std::get<bool>(rv)) : (std::get<bool>(lv) != std::get<bool>(rv));
+                return eq ? (std::get<bool>(lv) == std::get<bool>(rv)) : (std::get<bool>(lv) != std::get<bool>(rv));
             }
             if (std::holds_alternative<std::string>(lv) && std::holds_alternative<std::string>(rv)) {
-                return is_eq ? (std::get<std::string>(lv) == std::get<std::string>(rv))
-                             : (std::get<std::string>(lv) != std::get<std::string>(rv));
+                return eq ? (std::get<std::string>(lv) == std::get<std::string>(rv))
+                          : (std::get<std::string>(lv) != std::get<std::string>(rv));
             }
 
             throw std::runtime_error("type error: ==/!= require same type (int/char/bool/string)");
         }
 
-        // relational: ONLY int or char, same type
+        // relational: only int or char (same type)
         if (bin->op == BinaryExpr::Op::Lt || bin->op == BinaryExpr::Op::Le ||
             bin->op == BinaryExpr::Op::Gt || bin->op == BinaryExpr::Op::Ge) {
 
