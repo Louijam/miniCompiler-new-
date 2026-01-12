@@ -1,20 +1,21 @@
 #include <iostream>
 #include "interp/exec.hpp"
 
-static std::unique_ptr<ast::FunctionDef> make_set_func() {
+static std::unique_ptr<ast::FunctionDef> make_setb_func() {
     using namespace ast;
 
-    auto setf = std::make_unique<FunctionDef>();
-    setf->name = "set";
-    setf->return_type = Type::Int();
+    auto f = std::make_unique<FunctionDef>();
+    f->name = "setb";
+    f->return_type = Type::Bool();
 
     Param px;
     px.name = "x";
     px.type = Type::Int(true); // int&
-    setf->params.push_back(px);
+    f->params.push_back(px);
 
     auto body = std::make_unique<BlockStmt>();
 
+    // x = 7;
     auto assign_stmt = std::make_unique<ExprStmt>();
     auto assign_expr = std::make_unique<AssignExpr>();
     assign_expr->name = "x";
@@ -22,12 +23,13 @@ static std::unique_ptr<ast::FunctionDef> make_set_func() {
     assign_stmt->expr = std::move(assign_expr);
     body->statements.push_back(std::move(assign_stmt));
 
+    // return true;
     auto ret = std::make_unique<ReturnStmt>();
-    ret->value = std::make_unique<VarExpr>("x");
+    ret->value = std::make_unique<BoolLiteral>(true);
     body->statements.push_back(std::move(ret));
 
-    setf->body = std::move(body);
-    return setf;
+    f->body = std::move(body);
+    return f;
 }
 
 int main() {
@@ -38,24 +40,25 @@ int main() {
     FunctionTable functions;
 
     global.define_value("a", 0);
-    auto setf = make_set_func();
-    functions.add(*setf);
 
-    // e1 = (0 && set(a))  -> short-circuit, a stays 0
+    auto setb = make_setb_func();
+    functions.add(*setb);
+
+    // e1 = (false && setb(a)) -> short-circuit, a stays 0
     auto e1 = std::make_unique<BinaryExpr>();
     e1->op = BinaryExpr::Op::AndAnd;
-    e1->left = std::make_unique<IntLiteral>(0);
+    e1->left = std::make_unique<BoolLiteral>(false);
     auto c1 = std::make_unique<CallExpr>();
-    c1->callee = "set";
+    c1->callee = "setb";
     c1->args.push_back(std::make_unique<VarExpr>("a"));
     e1->right = std::move(c1);
 
-    // e2 = (1 || set(a)) -> short-circuit, a stays 0
+    // e2 = (true || setb(a)) -> short-circuit, a stays 0
     auto e2 = std::make_unique<BinaryExpr>();
     e2->op = BinaryExpr::Op::OrOr;
-    e2->left = std::make_unique<IntLiteral>(1);
+    e2->left = std::make_unique<BoolLiteral>(true);
     auto c2 = std::make_unique<CallExpr>();
-    c2->callee = "set";
+    c2->callee = "setb";
     c2->args.push_back(std::make_unique<VarExpr>("a"));
     e2->right = std::move(c2);
 
@@ -75,25 +78,27 @@ int main() {
     e3->left = std::move(add);
     e3->right = std::make_unique<IntLiteral>(11);
 
-    // e4 = !(5 == 5)
-    auto eq55 = std::make_unique<BinaryExpr>();
-    eq55->op = BinaryExpr::Op::Eq;
-    eq55->left = std::make_unique<IntLiteral>(5);
-    eq55->right = std::make_unique<IntLiteral>(5);
+    // invalid: 1 + true  -> should throw type error
+    auto bad = std::make_unique<BinaryExpr>();
+    bad->op = BinaryExpr::Op::Add;
+    bad->left = std::make_unique<IntLiteral>(1);
+    bad->right = std::make_unique<BoolLiteral>(true);
 
-    auto e4 = std::make_unique<UnaryExpr>();
-    e4->op = UnaryExpr::Op::Not;
-    e4->expr = std::move(eq55);
+    try {
+        Value r1 = eval_expr(global, *e1, functions);
+        Value r2 = eval_expr(global, *e2, functions);
+        Value r3 = eval_expr(global, *e3, functions);
 
-    Value r1 = eval_expr(global, *e1, functions);
-    Value r2 = eval_expr(global, *e2, functions);
-    Value r3 = eval_expr(global, *e3, functions);
-    Value r4 = eval_expr(global, *e4, functions);
+        std::cout << "e1=" << to_string(r1) << "\n";
+        std::cout << "e2=" << to_string(r2) << "\n";
+        std::cout << "a=" << to_string(global.read_value("a")) << "\n";
+        std::cout << "e3=" << to_string(r3) << "\n";
 
-    std::cout << "e1=" << to_string(r1) << "\n";
-    std::cout << "e2=" << to_string(r2) << "\n";
-    std::cout << "a=" << to_string(global.read_value("a")) << "\n";
-    std::cout << "e3=" << to_string(r3) << "\n";
-    std::cout << "e4=" << to_string(r4) << "\n";
+        (void)eval_expr(global, *bad, functions);
+        std::cout << "bad=NO_ERROR\n";
+    } catch (const std::exception& ex) {
+        std::cout << "error=" << ex.what() << "\n";
+    }
+
     return 0;
 }

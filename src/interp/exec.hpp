@@ -30,6 +30,26 @@ inline bool to_bool_like_cpp(const Value& v) {
     throw std::runtime_error("cannot convert to bool");
 }
 
+inline int expect_int(const Value& v, const char* ctx) {
+    if (auto* pi = std::get_if<int>(&v)) return *pi;
+    throw std::runtime_error(std::string("type error: expected int in ") + ctx);
+}
+
+inline bool expect_bool(const Value& v, const char* ctx) {
+    if (auto* pb = std::get_if<bool>(&v)) return *pb;
+    throw std::runtime_error(std::string("type error: expected bool in ") + ctx);
+}
+
+inline char expect_char(const Value& v, const char* ctx) {
+    if (auto* pc = std::get_if<char>(&v)) return *pc;
+    throw std::runtime_error(std::string("type error: expected char in ") + ctx);
+}
+
+inline const std::string& expect_string(const Value& v, const char* ctx) {
+    if (auto* ps = std::get_if<std::string>(&v)) return *ps;
+    throw std::runtime_error(std::string("type error: expected string in ") + ctx);
+}
+
 inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions);
 
 inline LValue eval_lvalue(Env& env, const ast::Expr& e) {
@@ -107,56 +127,94 @@ inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions) {
 
     if (auto* u = dynamic_cast<const UnaryExpr*>(&e)) {
         Value x = eval_expr(env, *u->expr, functions);
-
-        if (u->op == UnaryExpr::Op::Neg) {
-            return -std::get<int>(x);
-        }
-        if (u->op == UnaryExpr::Op::Not) {
-            return !std::get<bool>(x);
-        }
+        if (u->op == UnaryExpr::Op::Neg) return -expect_int(x, "unary -");
+        if (u->op == UnaryExpr::Op::Not) return !expect_bool(x, "unary !");
         throw std::runtime_error("unknown unary op");
     }
 
     if (auto* bin = dynamic_cast<const BinaryExpr*>(&e)) {
-        // Short-circuit
+        // && and ||: ONLY bool, with short-circuit
         if (bin->op == BinaryExpr::Op::AndAnd) {
-            Value lv = eval_expr(env, *bin->left, functions);
-            if (!to_bool_like_cpp(lv)) return false;
-            Value rv = eval_expr(env, *bin->right, functions);
-            return to_bool_like_cpp(rv);
+            bool lv = expect_bool(eval_expr(env, *bin->left, functions), "operator && (lhs)");
+            if (!lv) return false;
+            bool rv = expect_bool(eval_expr(env, *bin->right, functions), "operator && (rhs)");
+            return rv;
         }
         if (bin->op == BinaryExpr::Op::OrOr) {
-            Value lv = eval_expr(env, *bin->left, functions);
-            if (to_bool_like_cpp(lv)) return true;
-            Value rv = eval_expr(env, *bin->right, functions);
-            return to_bool_like_cpp(rv);
+            bool lv = expect_bool(eval_expr(env, *bin->left, functions), "operator || (lhs)");
+            if (lv) return true;
+            bool rv = expect_bool(eval_expr(env, *bin->right, functions), "operator || (rhs)");
+            return rv;
         }
 
         Value lv = eval_expr(env, *bin->left, functions);
         Value rv = eval_expr(env, *bin->right, functions);
 
-        int li = std::get<int>(lv);
-        int ri = std::get<int>(rv);
+        // arithmetic: ONLY int
+        if (bin->op == BinaryExpr::Op::Add || bin->op == BinaryExpr::Op::Sub ||
+            bin->op == BinaryExpr::Op::Mul || bin->op == BinaryExpr::Op::Div ||
+            bin->op == BinaryExpr::Op::Mod) {
 
-        switch (bin->op) {
-            case BinaryExpr::Op::Add: return li + ri;
-            case BinaryExpr::Op::Sub: return li - ri;
-            case BinaryExpr::Op::Mul: return li * ri;
-            case BinaryExpr::Op::Div:
-                if (ri == 0) throw std::runtime_error("division by zero");
-                return li / ri;
-            case BinaryExpr::Op::Mod:
-                if (ri == 0) throw std::runtime_error("modulo by zero");
-                return li % ri;
+            int li = expect_int(lv, "arithmetic");
+            int ri = expect_int(rv, "arithmetic");
 
-            case BinaryExpr::Op::Eq: return li == ri;
-            case BinaryExpr::Op::Ne: return li != ri;
-            case BinaryExpr::Op::Lt: return li < ri;
-            case BinaryExpr::Op::Le: return li <= ri;
-            case BinaryExpr::Op::Gt: return li > ri;
-            case BinaryExpr::Op::Ge: return li >= ri;
+            switch (bin->op) {
+                case BinaryExpr::Op::Add: return li + ri;
+                case BinaryExpr::Op::Sub: return li - ri;
+                case BinaryExpr::Op::Mul: return li * ri;
+                case BinaryExpr::Op::Div:
+                    if (ri == 0) throw std::runtime_error("runtime error: division by zero");
+                    return li / ri;
+                case BinaryExpr::Op::Mod:
+                    if (ri == 0) throw std::runtime_error("runtime error: modulo by zero");
+                    return li % ri;
+                default: break;
+            }
+        }
 
-            default: break;
+        // equality: same type; for bool/string only == != ; for int/char also ok
+        if (bin->op == BinaryExpr::Op::Eq || bin->op == BinaryExpr::Op::Ne) {
+            bool is_eq = (bin->op == BinaryExpr::Op::Eq);
+
+            if (std::holds_alternative<int>(lv) && std::holds_alternative<int>(rv)) {
+                return is_eq ? (std::get<int>(lv) == std::get<int>(rv)) : (std::get<int>(lv) != std::get<int>(rv));
+            }
+            if (std::holds_alternative<char>(lv) && std::holds_alternative<char>(rv)) {
+                return is_eq ? (std::get<char>(lv) == std::get<char>(rv)) : (std::get<char>(lv) != std::get<char>(rv));
+            }
+            if (std::holds_alternative<bool>(lv) && std::holds_alternative<bool>(rv)) {
+                return is_eq ? (std::get<bool>(lv) == std::get<bool>(rv)) : (std::get<bool>(lv) != std::get<bool>(rv));
+            }
+            if (std::holds_alternative<std::string>(lv) && std::holds_alternative<std::string>(rv)) {
+                return is_eq ? (std::get<std::string>(lv) == std::get<std::string>(rv))
+                             : (std::get<std::string>(lv) != std::get<std::string>(rv));
+            }
+
+            throw std::runtime_error("type error: ==/!= require same type (int/char/bool/string)");
+        }
+
+        // relational: ONLY int or char, same type
+        if (bin->op == BinaryExpr::Op::Lt || bin->op == BinaryExpr::Op::Le ||
+            bin->op == BinaryExpr::Op::Gt || bin->op == BinaryExpr::Op::Ge) {
+
+            auto cmp_int = [&](int a, int b) -> bool {
+                switch (bin->op) {
+                    case BinaryExpr::Op::Lt: return a < b;
+                    case BinaryExpr::Op::Le: return a <= b;
+                    case BinaryExpr::Op::Gt: return a > b;
+                    case BinaryExpr::Op::Ge: return a >= b;
+                    default: return false;
+                }
+            };
+
+            if (std::holds_alternative<int>(lv) && std::holds_alternative<int>(rv)) {
+                return cmp_int(std::get<int>(lv), std::get<int>(rv));
+            }
+            if (std::holds_alternative<char>(lv) && std::holds_alternative<char>(rv)) {
+                return cmp_int(static_cast<int>(std::get<char>(lv)), static_cast<int>(std::get<char>(rv)));
+            }
+
+            throw std::runtime_error("type error: < <= > >= require int or char (same type)");
         }
 
         throw std::runtime_error("unknown binary op");
