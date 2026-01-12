@@ -36,8 +36,18 @@ struct CallExpr : Expr {
     std::vector<ExprPtr> args;
 };
 
+struct UnaryExpr : Expr {
+    enum class Op { Neg, Not };
+    Op op;
+    ExprPtr expr;
+};
+
 struct BinaryExpr : Expr {
-    enum class Op { Add, Eq, AndAnd };
+    enum class Op {
+        Add, Sub, Mul, Div, Mod,
+        Eq, Ne, Lt, Le, Gt, Ge,
+        AndAnd, OrOr
+    };
     Op op;
     ExprPtr left;
     ExprPtr right;

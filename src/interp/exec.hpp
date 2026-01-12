@@ -34,10 +34,7 @@ inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions);
 
 inline LValue eval_lvalue(Env& env, const ast::Expr& e) {
     using namespace ast;
-
-    if (auto* v = dynamic_cast<const VarExpr*>(&e)) {
-        return env.resolve_lvalue(v->name);
-    }
+    if (auto* v = dynamic_cast<const VarExpr*>(&e)) return env.resolve_lvalue(v->name);
     throw std::runtime_error("expected lvalue (variable or field)");
 }
 
@@ -59,15 +56,13 @@ inline void exec_stmt(Env& env, const ast::Stmt& s, FunctionTable& functions) {
 
     if (auto* b = dynamic_cast<const BlockStmt*>(&s)) {
         Env local(&env);
-        for (auto& st : b->statements)
-            exec_stmt(local, *st, functions);
+        for (auto& st : b->statements) exec_stmt(local, *st, functions);
         return;
     }
 
     if (auto* v = dynamic_cast<const VarDeclStmt*>(&s)) {
         Value init = 0;
-        if (v->init)
-            init = eval_expr(env, *v->init, functions);
+        if (v->init) init = eval_expr(env, *v->init, functions);
         env.define_value(v->name, init);
         return;
     }
@@ -79,17 +74,13 @@ inline void exec_stmt(Env& env, const ast::Stmt& s, FunctionTable& functions) {
 
     if (auto* i = dynamic_cast<const IfStmt*>(&s)) {
         bool cond = to_bool_like_cpp(eval_expr(env, *i->cond, functions));
-        if (cond) {
-            exec_stmt(env, *i->then_branch, functions);
-        } else if (i->else_branch) {
-            exec_stmt(env, *i->else_branch, functions);
-        }
+        if (cond) exec_stmt(env, *i->then_branch, functions);
+        else if (i->else_branch) exec_stmt(env, *i->else_branch, functions);
         return;
     }
 
     if (auto* w = dynamic_cast<const WhileStmt*>(&s)) {
-        while (to_bool_like_cpp(eval_expr(env, *w->cond, functions)))
-            exec_stmt(env, *w->body, functions);
+        while (to_bool_like_cpp(eval_expr(env, *w->cond, functions))) exec_stmt(env, *w->body, functions);
         return;
     }
 
@@ -104,14 +95,9 @@ inline void exec_stmt(Env& env, const ast::Stmt& s, FunctionTable& functions) {
 inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions) {
     using namespace ast;
 
-    if (auto* i = dynamic_cast<const IntLiteral*>(&e))
-        return i->value;
-
-    if (auto* b = dynamic_cast<const BoolLiteral*>(&e))
-        return b->value;
-
-    if (auto* v = dynamic_cast<const VarExpr*>(&e))
-        return env.read_value(v->name);
+    if (auto* i = dynamic_cast<const IntLiteral*>(&e)) return i->value;
+    if (auto* b = dynamic_cast<const BoolLiteral*>(&e)) return b->value;
+    if (auto* v = dynamic_cast<const VarExpr*>(&e)) return env.read_value(v->name);
 
     if (auto* a = dynamic_cast<const AssignExpr*>(&e)) {
         Value rhs = eval_expr(env, *a->value, functions);
@@ -119,11 +105,29 @@ inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions) {
         return rhs;
     }
 
+    if (auto* u = dynamic_cast<const UnaryExpr*>(&e)) {
+        Value x = eval_expr(env, *u->expr, functions);
+
+        if (u->op == UnaryExpr::Op::Neg) {
+            return -std::get<int>(x);
+        }
+        if (u->op == UnaryExpr::Op::Not) {
+            return !std::get<bool>(x);
+        }
+        throw std::runtime_error("unknown unary op");
+    }
+
     if (auto* bin = dynamic_cast<const BinaryExpr*>(&e)) {
+        // Short-circuit
         if (bin->op == BinaryExpr::Op::AndAnd) {
-            // short-circuit
             Value lv = eval_expr(env, *bin->left, functions);
             if (!to_bool_like_cpp(lv)) return false;
+            Value rv = eval_expr(env, *bin->right, functions);
+            return to_bool_like_cpp(rv);
+        }
+        if (bin->op == BinaryExpr::Op::OrOr) {
+            Value lv = eval_expr(env, *bin->left, functions);
+            if (to_bool_like_cpp(lv)) return true;
             Value rv = eval_expr(env, *bin->right, functions);
             return to_bool_like_cpp(rv);
         }
@@ -131,11 +135,28 @@ inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions) {
         Value lv = eval_expr(env, *bin->left, functions);
         Value rv = eval_expr(env, *bin->right, functions);
 
-        if (bin->op == BinaryExpr::Op::Add) {
-            return std::get<int>(lv) + std::get<int>(rv);
-        }
-        if (bin->op == BinaryExpr::Op::Eq) {
-            return std::get<int>(lv) == std::get<int>(rv);
+        int li = std::get<int>(lv);
+        int ri = std::get<int>(rv);
+
+        switch (bin->op) {
+            case BinaryExpr::Op::Add: return li + ri;
+            case BinaryExpr::Op::Sub: return li - ri;
+            case BinaryExpr::Op::Mul: return li * ri;
+            case BinaryExpr::Op::Div:
+                if (ri == 0) throw std::runtime_error("division by zero");
+                return li / ri;
+            case BinaryExpr::Op::Mod:
+                if (ri == 0) throw std::runtime_error("modulo by zero");
+                return li % ri;
+
+            case BinaryExpr::Op::Eq: return li == ri;
+            case BinaryExpr::Op::Ne: return li != ri;
+            case BinaryExpr::Op::Lt: return li < ri;
+            case BinaryExpr::Op::Le: return li <= ri;
+            case BinaryExpr::Op::Gt: return li > ri;
+            case BinaryExpr::Op::Ge: return li >= ri;
+
+            default: break;
         }
 
         throw std::runtime_error("unknown binary op");
@@ -144,9 +165,7 @@ inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions) {
     if (auto* c = dynamic_cast<const CallExpr*>(&e)) {
         std::vector<Type> arg_types;
         arg_types.reserve(c->args.size());
-        for (auto& arg : c->args) {
-            arg_types.push_back(eval_arg_type(env, *arg, functions));
-        }
+        for (auto& arg : c->args) arg_types.push_back(eval_arg_type(env, *arg, functions));
 
         auto& f = functions.resolve(c->callee, arg_types);
 
