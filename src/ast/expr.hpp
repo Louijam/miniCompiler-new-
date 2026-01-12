@@ -16,6 +16,11 @@ struct IntLiteral : Expr {
     explicit IntLiteral(int v) : value(v) {}
 };
 
+struct BoolLiteral : Expr {
+    bool value;
+    explicit BoolLiteral(bool v) : value(v) {}
+};
+
 struct VarExpr : Expr {
     std::string name;
     explicit VarExpr(std::string n) : name(std::move(n)) {}
@@ -29,6 +34,13 @@ struct AssignExpr : Expr {
 struct CallExpr : Expr {
     std::string callee;
     std::vector<ExprPtr> args;
+};
+
+struct BinaryExpr : Expr {
+    enum class Op { Add, Eq, AndAnd };
+    Op op;
+    ExprPtr left;
+    ExprPtr right;
 };
 
 } // namespace ast
