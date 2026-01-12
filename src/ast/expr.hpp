@@ -1,6 +1,7 @@
 #pragma once
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace ast {
 
@@ -23,6 +24,11 @@ struct VarExpr : Expr {
 struct AssignExpr : Expr {
     std::string name;
     ExprPtr value;
+};
+
+struct CallExpr : Expr {
+    std::string callee;
+    std::vector<ExprPtr> args;
 };
 
 } // namespace ast

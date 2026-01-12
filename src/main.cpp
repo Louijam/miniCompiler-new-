@@ -1,4 +1,5 @@
 #include <iostream>
+
 #include "interp/exec.hpp"
 
 int main() {
@@ -6,21 +7,22 @@ int main() {
     using namespace interp;
 
     Env global;
+    FunctionTable functions;
 
-    // int x = 1;
-    VarDeclStmt decl;
-    decl.name = "x";
-    decl.init = std::make_unique<IntLiteral>(1);
-    exec_stmt(global, decl);
+    auto f = std::make_unique<FunctionDef>();
+    f->name = "f";
+    f->return_type = Type::Int();
 
-    // x = 42;
-    ExprStmt assign;
-    auto a = std::make_unique<AssignExpr>();
-    a->name = "x";
-    a->value = std::make_unique<IntLiteral>(42);
-    assign.expr = std::move(a);
-    exec_stmt(global, assign);
+    auto ret = std::make_unique<ReturnStmt>();
+    ret->value = std::make_unique<IntLiteral>(42);
+    f->body = std::move(ret);
 
-    std::cout << "x=" << to_string(global.read_value("x")) << "\n";
+    functions.add(*f);
+
+    CallExpr call;
+    call.callee = "f";
+
+    Value v = eval_expr(global, call, functions);
+    std::cout << "f() = " << to_string(v) << "\n";
     return 0;
 }
