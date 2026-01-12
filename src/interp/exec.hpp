@@ -14,6 +14,17 @@ struct ReturnSignal {
 
 inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions);
 
+inline LValue eval_lvalue(Env& env, const ast::Expr& e) {
+    using namespace ast;
+
+    // LValue: nur VarExpr (später: FieldAccess)
+    if (auto* v = dynamic_cast<const VarExpr*>(&e)) {
+        return env.resolve_lvalue(v->name);
+    }
+
+    throw std::runtime_error("expected lvalue (variable or field)");
+}
+
 inline void exec_stmt(Env& env, const ast::Stmt& s, FunctionTable& functions) {
     using namespace ast;
 
@@ -85,8 +96,17 @@ inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions) {
         Env call_env(&env);
 
         for (size_t i = 0; i < f.params.size(); ++i) {
-            Value v = eval_expr(env, *c->args[i], functions);
-            call_env.define_value(f.params[i].name, v);
+            const auto& p = f.params[i];
+
+            if (p.type.is_ref) {
+                // T&: argument must be LValue, bind through existing references
+                LValue target = eval_lvalue(env, *c->args[i]);
+                call_env.define_ref(p.name, target);
+            } else {
+                // T: normal by-value copy
+                Value v = eval_expr(env, *c->args[i], functions);
+                call_env.define_value(p.name, v);
+            }
         }
 
         try {
