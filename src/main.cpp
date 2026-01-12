@@ -1,5 +1,5 @@
-#include <iostream>
 #include "interp/exec.hpp"
+#include <string>
 
 int main() {
     using namespace ast;
@@ -8,29 +8,31 @@ int main() {
     Env env;
     FunctionTable funcs;
 
-    env.define_value("c1", 'a');
-    env.define_value("c2", 'b');
-    env.define_value("s1", std::string("foo"));
-    env.define_value("s2", std::string("foo"));
-    env.define_value("s3", std::string("bar"));
+    env.define_value("i", 42);
+    env.define_value("b", true);
+    env.define_value("c", 'Z');
+    env.define_value("s", std::string("hello"));
 
-    auto e1 = std::make_unique<BinaryExpr>();
-    e1->op = BinaryExpr::Op::Lt;
-    e1->left = std::make_unique<VarExpr>("c1");
-    e1->right = std::make_unique<VarExpr>("c2");
+    auto call_i = std::make_unique<CallExpr>();
+    call_i->callee = "print_int";
+    call_i->args.push_back(std::make_unique<VarExpr>("i"));
 
-    auto e2 = std::make_unique<BinaryExpr>();
-    e2->op = BinaryExpr::Op::Eq;
-    e2->left = std::make_unique<VarExpr>("s1");
-    e2->right = std::make_unique<VarExpr>("s2");
+    auto call_b = std::make_unique<CallExpr>();
+    call_b->callee = "print_bool";
+    call_b->args.push_back(std::make_unique<VarExpr>("b"));
 
-    auto e3 = std::make_unique<BinaryExpr>();
-    e3->op = BinaryExpr::Op::Ne;
-    e3->left = std::make_unique<VarExpr>("s1");
-    e3->right = std::make_unique<VarExpr>("s3");
+    auto call_c = std::make_unique<CallExpr>();
+    call_c->callee = "print_char";
+    call_c->args.push_back(std::make_unique<VarExpr>("c"));
 
-    std::cout << "c1<c2=" << to_string(eval_expr(env, *e1, funcs)) << "\n";
-    std::cout << "s1==s2=" << to_string(eval_expr(env, *e2, funcs)) << "\n";
-    std::cout << "s1!=s3=" << to_string(eval_expr(env, *e3, funcs)) << "\n";
+    auto call_s = std::make_unique<CallExpr>();
+    call_s->callee = "print_string";
+    call_s->args.push_back(std::make_unique<VarExpr>("s"));
+
+    (void)eval_expr(env, *call_i, funcs);
+    (void)eval_expr(env, *call_b, funcs);
+    (void)eval_expr(env, *call_c, funcs);
+    (void)eval_expr(env, *call_s, funcs);
+
     return 0;
 }

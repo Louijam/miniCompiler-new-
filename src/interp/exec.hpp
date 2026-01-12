@@ -1,6 +1,7 @@
 #pragma once
 #include <stdexcept>
 #include <vector>
+#include <iostream>
 
 #include "env.hpp"
 #include "functions.hpp"
@@ -38,6 +39,16 @@ inline int expect_int(const Value& v, const char* ctx) {
 inline bool expect_bool(const Value& v, const char* ctx) {
     if (auto* pb = std::get_if<bool>(&v)) return *pb;
     throw std::runtime_error(std::string("type error: expected bool in ") + ctx);
+}
+
+inline char expect_char(const Value& v, const char* ctx) {
+    if (auto* pc = std::get_if<char>(&v)) return *pc;
+    throw std::runtime_error(std::string("type error: expected char in ") + ctx);
+}
+
+inline const std::string& expect_string(const Value& v, const char* ctx) {
+    if (auto* ps = std::get_if<std::string>(&v)) return *ps;
+    throw std::runtime_error(std::string("type error: expected string in ") + ctx);
 }
 
 inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions);
@@ -165,23 +176,19 @@ inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions) {
             }
         }
 
-        // equality: same type; bool/string only == !=; int/char also ok
+        // equality: same type
         if (bin->op == BinaryExpr::Op::Eq || bin->op == BinaryExpr::Op::Ne) {
             bool eq = (bin->op == BinaryExpr::Op::Eq);
 
-            if (std::holds_alternative<int>(lv) && std::holds_alternative<int>(rv)) {
+            if (std::holds_alternative<int>(lv) && std::holds_alternative<int>(rv))
                 return eq ? (std::get<int>(lv) == std::get<int>(rv)) : (std::get<int>(lv) != std::get<int>(rv));
-            }
-            if (std::holds_alternative<char>(lv) && std::holds_alternative<char>(rv)) {
+            if (std::holds_alternative<char>(lv) && std::holds_alternative<char>(rv))
                 return eq ? (std::get<char>(lv) == std::get<char>(rv)) : (std::get<char>(lv) != std::get<char>(rv));
-            }
-            if (std::holds_alternative<bool>(lv) && std::holds_alternative<bool>(rv)) {
+            if (std::holds_alternative<bool>(lv) && std::holds_alternative<bool>(rv))
                 return eq ? (std::get<bool>(lv) == std::get<bool>(rv)) : (std::get<bool>(lv) != std::get<bool>(rv));
-            }
-            if (std::holds_alternative<std::string>(lv) && std::holds_alternative<std::string>(rv)) {
+            if (std::holds_alternative<std::string>(lv) && std::holds_alternative<std::string>(rv))
                 return eq ? (std::get<std::string>(lv) == std::get<std::string>(rv))
                           : (std::get<std::string>(lv) != std::get<std::string>(rv));
-            }
 
             throw std::runtime_error("type error: ==/!= require same type (int/char/bool/string)");
         }
@@ -200,12 +207,11 @@ inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions) {
                 }
             };
 
-            if (std::holds_alternative<int>(lv) && std::holds_alternative<int>(rv)) {
+            if (std::holds_alternative<int>(lv) && std::holds_alternative<int>(rv))
                 return cmp_int(std::get<int>(lv), std::get<int>(rv));
-            }
-            if (std::holds_alternative<char>(lv) && std::holds_alternative<char>(rv)) {
+
+            if (std::holds_alternative<char>(lv) && std::holds_alternative<char>(rv))
                 return cmp_int(static_cast<int>(std::get<char>(lv)), static_cast<int>(std::get<char>(rv)));
-            }
 
             throw std::runtime_error("type error: < <= > >= require int or char (same type)");
         }
@@ -214,6 +220,33 @@ inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions) {
     }
 
     if (auto* c = dynamic_cast<const CallExpr*>(&e)) {
+        // -------- Builtins: print_* --------
+        if (c->callee == "print_int") {
+            if (c->args.size() != 1) throw std::runtime_error("print_int expects 1 argument");
+            Value v = eval_expr(env, *c->args[0], functions);
+            std::cout << expect_int(v, "print_int") << "\n";
+            return Value{0};
+        }
+        if (c->callee == "print_bool") {
+            if (c->args.size() != 1) throw std::runtime_error("print_bool expects 1 argument");
+            Value v = eval_expr(env, *c->args[0], functions);
+            std::cout << (expect_bool(v, "print_bool") ? "true" : "false") << "\n";
+            return Value{0};
+        }
+        if (c->callee == "print_char") {
+            if (c->args.size() != 1) throw std::runtime_error("print_char expects 1 argument");
+            Value v = eval_expr(env, *c->args[0], functions);
+            std::cout << expect_char(v, "print_char") << "\n";
+            return Value{0};
+        }
+        if (c->callee == "print_string") {
+            if (c->args.size() != 1) throw std::runtime_error("print_string expects 1 argument");
+            Value v = eval_expr(env, *c->args[0], functions);
+            std::cout << expect_string(v, "print_string") << "\n";
+            return Value{0};
+        }
+        // ----------------------------------
+
         std::vector<Type> arg_types;
         arg_types.reserve(c->args.size());
         for (auto& arg : c->args) arg_types.push_back(eval_arg_type(env, *arg, functions));
