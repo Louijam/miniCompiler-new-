@@ -1,10 +1,12 @@
 #pragma once
 #include <stdexcept>
+#include <vector>
 
 #include "env.hpp"
 #include "functions.hpp"
 #include "../ast/stmt.hpp"
 #include "../ast/expr.hpp"
+#include "../ast/type.hpp"
 
 namespace interp {
 
@@ -12,17 +14,38 @@ struct ReturnSignal {
     Value value;
 };
 
+inline ast::Type value_to_type(const Value& v) {
+    if (std::holds_alternative<int>(v)) return ast::Type::Int();
+    if (std::holds_alternative<bool>(v)) return ast::Type::Bool();
+    if (std::holds_alternative<char>(v)) return ast::Type::Char();
+    if (std::holds_alternative<std::string>(v)) return ast::Type::String();
+    throw std::runtime_error("unsupported runtime value type");
+}
+
 inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions);
 
 inline LValue eval_lvalue(Env& env, const ast::Expr& e) {
     using namespace ast;
 
-    // LValue: nur VarExpr (später: FieldAccess)
     if (auto* v = dynamic_cast<const VarExpr*>(&e)) {
         return env.resolve_lvalue(v->name);
     }
 
     throw std::runtime_error("expected lvalue (variable or field)");
+}
+
+inline ast::Type eval_arg_type(Env& env, const ast::Expr& e, FunctionTable& functions) {
+    // Design: LValue-Argumente zaehlen als T& (passt zur "inkl &-Markierung" Spez)
+    try {
+        LValue lv = eval_lvalue(env, e);
+        Value vv = env.read_lvalue(lv);
+        ast::Type t = value_to_type(vv);
+        t.is_ref = true;
+        return t;
+    } catch (...) {
+        Value vv = eval_expr(env, e, functions);
+        return value_to_type(vv);
+    }
 }
 
 inline void exec_stmt(Env& env, const ast::Stmt& s, FunctionTable& functions) {
@@ -88,10 +111,13 @@ inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions) {
     }
 
     if (auto* c = dynamic_cast<const CallExpr*>(&e)) {
-        auto& f = functions.get(c->callee);
+        std::vector<Type> arg_types;
+        arg_types.reserve(c->args.size());
+        for (auto& arg : c->args) {
+            arg_types.push_back(eval_arg_type(env, *arg, functions));
+        }
 
-        if (f.params.size() != c->args.size())
-            throw std::runtime_error("argument count mismatch");
+        auto& f = functions.resolve(c->callee, arg_types);
 
         Env call_env(&env);
 
@@ -99,11 +125,9 @@ inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions) {
             const auto& p = f.params[i];
 
             if (p.type.is_ref) {
-                // T&: argument must be LValue, bind through existing references
                 LValue target = eval_lvalue(env, *c->args[i]);
                 call_env.define_ref(p.name, target);
             } else {
-                // T: normal by-value copy
                 Value v = eval_expr(env, *c->args[i], functions);
                 call_env.define_value(p.name, v);
             }
