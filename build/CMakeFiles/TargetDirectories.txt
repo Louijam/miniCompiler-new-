@@ -1,0 +1,3 @@
+/home/vboxuser/dev/mini_cpp/build/CMakeFiles/mini_cpp.dir
+/home/vboxuser/dev/mini_cpp/build/CMakeFiles/edit_cache.dir
+/home/vboxuser/dev/mini_cpp/build/CMakeFiles/rebuild_cache.dir
