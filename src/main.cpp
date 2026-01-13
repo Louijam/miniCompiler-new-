@@ -1,38 +1,42 @@
-#include "interp/exec.hpp"
-#include <string>
+#include <iostream>
+
+#include "sem/scope.hpp"
+#include "ast/type.hpp"
 
 int main() {
+    using namespace sem;
     using namespace ast;
-    using namespace interp;
 
-    Env env;
-    FunctionTable funcs;
+    try {
+        Scope global;
 
-    env.define_value("i", 42);
-    env.define_value("b", true);
-    env.define_value("c", 'Z');
-    env.define_value("s", std::string("hello"));
+        // vars
+        global.define_var("x", Type::Int());
+        std::cout << "global x: " << to_string(global.lookup_var("x").type) << "\n";
 
-    auto call_i = std::make_unique<CallExpr>();
-    call_i->callee = "print_int";
-    call_i->args.push_back(std::make_unique<VarExpr>("i"));
+        // nested scope shadows x
+        Scope inner(&global);
+        inner.define_var("x", Type::Bool());
+        std::cout << "inner x: " << to_string(inner.lookup_var("x").type) << "\n";
+        std::cout << "inner lookup global via parent y? -> expect error next\n";
 
-    auto call_b = std::make_unique<CallExpr>();
-    call_b->callee = "print_bool";
-    call_b->args.push_back(std::make_unique<VarExpr>("b"));
+        // funcs (overloads)
+        FuncSymbol f1{"f", Type::Int(), {Type::Int(false)}};
+        FuncSymbol f2{"f", Type::Int(), {Type::Int(true)}};
+        global.define_func(f1);
+        global.define_func(f2);
 
-    auto call_c = std::make_unique<CallExpr>();
-    call_c->callee = "print_char";
-    call_c->args.push_back(std::make_unique<VarExpr>("c"));
+        // resolve exact
+        auto& r1 = global.resolve_func("f", {Type::Int(false)});
+        auto& r2 = global.resolve_func("f", {Type::Int(true)});
+        std::cout << "resolve f(int): returns " << to_string(r1.return_type) << "\n";
+        std::cout << "resolve f(int&): returns " << to_string(r2.return_type) << "\n";
 
-    auto call_s = std::make_unique<CallExpr>();
-    call_s->callee = "print_string";
-    call_s->args.push_back(std::make_unique<VarExpr>("s"));
-
-    (void)eval_expr(env, *call_i, funcs);
-    (void)eval_expr(env, *call_b, funcs);
-    (void)eval_expr(env, *call_c, funcs);
-    (void)eval_expr(env, *call_s, funcs);
+        // trigger unknown variable error
+        (void)inner.lookup_var("y");
+    } catch (const std::exception& ex) {
+        std::cout << "error=" << ex.what() << "\n";
+    }
 
     return 0;
 }
