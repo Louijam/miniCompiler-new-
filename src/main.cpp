@@ -3,42 +3,37 @@
 #include "sem/program_analyzer.hpp"
 #include "ast/program.hpp"
 #include "ast/class.hpp"
-#include "ast/function.hpp"
 #include "ast/stmt.hpp"
 #include "ast/expr.hpp"
 #include "ast/type.hpp"
 
-static ast::MethodDef make_method_virtual_m() {
+static ast::MethodDef make_ok_method_uses_field_y() {
     using namespace ast;
     MethodDef m;
-    m.is_virtual = true;
     m.name = "m";
     m.return_type = Type::Int();
-    m.params.push_back(Param{"x", Type::Int(false)});
 
+    // { return y; }  (y is a field)
     auto body = std::make_unique<BlockStmt>();
     auto ret = std::make_unique<ReturnStmt>();
-    ret->value = std::make_unique<VarExpr>("x");
+    ret->value = std::make_unique<VarExpr>("y");
     body->statements.push_back(std::move(ret));
     m.body = std::move(body);
-
     return m;
 }
 
-static ast::MethodDef make_method_override_m() {
+static ast::MethodDef make_bad_method_param_shadows_field() {
     using namespace ast;
     MethodDef m;
-    m.is_virtual = false; // override still ok if base is virtual
-    m.name = "m";
+    m.name = "bad";
     m.return_type = Type::Int();
-    m.params.push_back(Param{"x", Type::Int(false)});
+    m.params.push_back(Param{"y", Type::Int(false)}); // shadows field y -> must error
 
     auto body = std::make_unique<BlockStmt>();
     auto ret = std::make_unique<ReturnStmt>();
-    ret->value = std::make_unique<VarExpr>("x");
+    ret->value = std::make_unique<VarExpr>("y");
     body->statements.push_back(std::move(ret));
     m.body = std::move(body);
-
     return m;
 }
 
@@ -51,15 +46,10 @@ int main() {
 
         ClassDef A;
         A.name = "A";
-        A.methods.push_back(make_method_virtual_m());
-
-        ClassDef D;
-        D.name = "D";
-        D.base_name = "A";
-        D.methods.push_back(make_method_override_m());
+        A.fields.push_back(FieldDecl{Type::Int(), "y"});
+        A.methods.push_back(make_ok_method_uses_field_y());
 
         p.classes.push_back(std::move(A));
-        p.classes.push_back(std::move(D));
 
         ProgramAnalyzer pa;
         pa.analyze(p);
@@ -71,11 +61,12 @@ int main() {
     try {
         Program p2;
 
-        ClassDef X; X.name = "X"; X.base_name = "Y";
-        ClassDef Y; Y.name = "Y"; Y.base_name = "X";
+        ClassDef A;
+        A.name = "A";
+        A.fields.push_back(FieldDecl{Type::Int(), "y"});
+        A.methods.push_back(make_bad_method_param_shadows_field());
 
-        p2.classes.push_back(std::move(X));
-        p2.classes.push_back(std::move(Y));
+        p2.classes.push_back(std::move(A));
 
         ProgramAnalyzer pa;
         pa.analyze(p2);

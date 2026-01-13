@@ -11,13 +11,13 @@
 namespace sem {
 
 struct ProgramAnalyzer {
-    Analyzer fun_analyzer;
+    Analyzer analyzer;
 
     static void check_main_signature(const Scope& global) {
         bool ok = false;
 
         auto it = global.funcs.find("main");
-        if (it == global.funcs.end()) return; // main optional
+        if (it == global.funcs.end()) return;
 
         for (const auto& f : it->second) {
             if (!f.param_types.empty()) continue;
@@ -34,35 +34,40 @@ struct ProgramAnalyzer {
         Scope global;
         ClassTable ct;
 
-        // ---------- PASS 0 (classes): collect names ----------
+        // PASS 0: class names
         for (const auto& c : p.classes) ct.add_class_name(c.name);
 
-        // ---------- PASS 1 (classes): fill members + base links ----------
+        // PASS 1: class members
         for (const auto& c : p.classes) ct.fill_class_members(c);
 
-        // ---------- PASS 2 (classes): inheritance validity ----------
+        // PASS 2: inheritance checks
         ct.check_inheritance();
 
-        // ---------- PASS 3 (classes): override checks ----------
+        // PASS 3: overrides
         ct.check_overrides_and_virtuals();
 
-        // ---------- PASS 1 (functions): collect function signatures ----------
+        // PASS 1: function signatures
         for (const auto& f : p.functions) {
             FuncSymbol sym;
             sym.name = f.name;
             sym.return_type = f.return_type;
-
             sym.param_types.reserve(f.params.size());
             for (const auto& par : f.params) sym.param_types.push_back(par.type);
-
             global.define_func(sym);
         }
 
         check_main_signature(global);
 
-        // ---------- PASS 2 (functions): check bodies ----------
+        // PASS 2: function bodies
         for (const auto& f : p.functions) {
-            fun_analyzer.check_function(global, f);
+            analyzer.check_function(global, f);
+        }
+
+        // PASS 4: method bodies (name lookup order inside methods)
+        for (const auto& c : p.classes) {
+            for (const auto& m : c.methods) {
+                analyzer.check_method(global, ct, c.name, m);
+            }
         }
     }
 };

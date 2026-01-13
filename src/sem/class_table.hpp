@@ -4,10 +4,10 @@
 #include <unordered_set>
 #include <vector>
 #include <stdexcept>
+#include <optional>
 
 #include "../ast/class.hpp"
 #include "../ast/type.hpp"
-#include "symbol.hpp"
 
 namespace sem {
 
@@ -22,8 +22,8 @@ struct ClassSymbol {
     std::string name;
     std::string base_name; // empty if none
 
-    std::unordered_map<std::string, ast::Type> fields; // only own fields (for now)
-    std::unordered_map<std::string, std::vector<MethodSymbol>> methods; // overload set per name
+    std::unordered_map<std::string, ast::Type> fields; // own fields
+    std::unordered_map<std::string, std::vector<MethodSymbol>> methods; // own methods
 };
 
 struct ClassTable {
@@ -43,6 +43,10 @@ struct ClassTable {
         classes.emplace(name, std::move(cs));
     }
 
+    bool has_class(const std::string& name) const {
+        return classes.find(name) != classes.end();
+    }
+
     ClassSymbol& get_class(const std::string& name) {
         auto it = classes.find(name);
         if (it == classes.end()) throw std::runtime_error("semantic error: unknown class: " + name);
@@ -55,23 +59,16 @@ struct ClassTable {
         return it->second;
     }
 
-    bool has_class(const std::string& name) const {
-        return classes.find(name) != classes.end();
-    }
-
-    // PASS 1: fill members + base links
     void fill_class_members(const ast::ClassDef& c) {
         ClassSymbol& cs = get_class(c.name);
         cs.base_name = c.base_name;
 
-        // fields: unique within class
         for (const auto& f : c.fields) {
             if (cs.fields.find(f.name) != cs.fields.end())
                 throw std::runtime_error("semantic error: field redefinition in class " + c.name + ": " + f.name);
             cs.fields.emplace(f.name, f.type);
         }
 
-        // methods: overloads; no duplicate signature in same class
         for (const auto& m : c.methods) {
             MethodSymbol ms;
             ms.name = m.name;
@@ -91,16 +88,13 @@ struct ClassTable {
         }
     }
 
-    // PASS 2: check base existence + cycles
     void check_inheritance() const {
-        // base must exist
         for (const auto& [name, cs] : classes) {
             if (!cs.base_name.empty() && !has_class(cs.base_name)) {
                 throw std::runtime_error("semantic error: unknown base class of " + name + ": " + cs.base_name);
             }
         }
 
-        // cycle detection DFS
         enum class Mark { None, Temp, Perm };
         std::unordered_map<std::string, Mark> mark;
         for (const auto& [name, _] : classes) mark[name] = Mark::None;
@@ -120,7 +114,6 @@ struct ClassTable {
         for (const auto& [name, _] : classes) dfs(dfs, name);
     }
 
-    // helper: find a method in class chain (first match by exact signature)
     const MethodSymbol* find_in_chain(const std::string& class_name, const MethodSymbol& wanted) const {
         const ClassSymbol* cur = &get_class(class_name);
         while (cur) {
@@ -136,28 +129,58 @@ struct ClassTable {
         return nullptr;
     }
 
-    // PASS 3: override checks + virtual propagation rule
     void check_overrides_and_virtuals() const {
         for (const auto& [name, cs] : classes) {
             if (cs.base_name.empty()) continue;
 
-            // for each method in derived, see if it matches something in base chain
             for (const auto& [mname, overloads] : cs.methods) {
                 for (const auto& dm : overloads) {
                     const MethodSymbol* bm = find_in_chain(cs.base_name, dm);
-                    if (!bm) continue; // not an override
+                    if (!bm) continue;
 
-                    // return type must match exactly for our subset
                     if (bm->return_type != dm.return_type) {
                         throw std::runtime_error("semantic error: override return type mismatch in class " + name + " for method " + mname);
                     }
-
-                    // virtual propagation: if base is virtual, derived is effectively virtual
-                    // (we do not mutate here; we just ensure consistency rules are ok)
-                    // If derived says virtual but base not virtual: allow (C++ allows), but dispatch depends on static type anyway.
                 }
             }
         }
+    }
+
+    // ---- NEW: field lookup for method name resolution ----
+    bool has_field_in_chain(const std::string& class_name, const std::string& field) const {
+        const ClassSymbol* cur = &get_class(class_name);
+        while (cur) {
+            if (cur->fields.find(field) != cur->fields.end()) return true;
+            if (cur->base_name.empty()) break;
+            cur = &get_class(cur->base_name);
+        }
+        return false;
+    }
+
+    ast::Type field_type_in_chain(const std::string& class_name, const std::string& field) const {
+        const ClassSymbol* cur = &get_class(class_name);
+        while (cur) {
+            auto it = cur->fields.find(field);
+            if (it != cur->fields.end()) return it->second;
+            if (cur->base_name.empty()) break;
+            cur = &get_class(cur->base_name);
+        }
+        throw std::runtime_error("semantic error: unknown field in class chain: " + class_name + "." + field);
+    }
+
+    // collect fields into a single map where derived wins over base (for member-scope building)
+    std::unordered_map<std::string, ast::Type> merged_fields_derived_wins(const std::string& class_name) const {
+        std::unordered_map<std::string, ast::Type> out;
+        const ClassSymbol* cur = &get_class(class_name);
+        while (cur) {
+            // insert only if not present yet (derived inserted first)
+            for (const auto& [fname, ftype] : cur->fields) {
+                if (out.find(fname) == out.end()) out.emplace(fname, ftype);
+            }
+            if (cur->base_name.empty()) break;
+            cur = &get_class(cur->base_name);
+        }
+        return out;
     }
 };
 

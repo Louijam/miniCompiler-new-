@@ -2,11 +2,14 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <unordered_map>
 
 #include "scope.hpp"
+#include "class_table.hpp"
 #include "../ast/expr.hpp"
 #include "../ast/stmt.hpp"
 #include "../ast/function.hpp"
+#include "../ast/class.hpp"
 #include "../ast/type.hpp"
 
 namespace sem {
@@ -32,7 +35,6 @@ struct Analyzer {
 
     // ---------- overload resolution (base types + ref-bind rule + prefer ref) ----------
     const FuncSymbol& resolve_call(const Scope& scope, const ast::CallExpr& call) const {
-        // find overload set up the scope chain
         const Scope* s = &scope;
         const std::vector<FuncSymbol>* overloads = nullptr;
         while (s) {
@@ -49,19 +51,17 @@ struct Analyzer {
             if (cand.param_types.size() != call.args.size()) continue;
 
             bool ok = true;
-            int score = 0; // tie-breaker: prefer ref params when possible
+            int score = 0;
 
             for (size_t i = 0; i < call.args.size(); ++i) {
                 ast::Type arg_t = base_type(type_of_expr(scope, *call.args[i]));
                 ast::Type par_t = cand.param_types[i];
 
-                // base types must match
                 if (base_type(par_t) != arg_t) { ok = false; break; }
 
-                // if param is ref: arg must be lvalue
                 if (par_t.is_ref) {
                     if (!is_lvalue(*call.args[i])) { ok = false; break; }
-                    score += 1; // prefer ref overload over value overload
+                    score += 1;
                 }
             }
 
@@ -71,7 +71,6 @@ struct Analyzer {
                 best_score = score;
                 best = &cand;
             } else if (score == best_score) {
-                // two equally-good candidates -> ambiguous
                 throw std::runtime_error("semantic error: ambiguous overload: " + call.callee);
             }
         }
@@ -165,19 +164,41 @@ struct Analyzer {
         throw std::runtime_error("semantic error: unknown expression node");
     }
 
-    // ---------- statements ----------
+    // ---------- statements (normal functions) ----------
     void check_stmt(Scope& scope, const ast::Stmt& s, const ast::Type& expected_return) const {
+        check_stmt_impl(scope, s, expected_return, nullptr, nullptr);
+    }
+
+    // ---------- statements (methods) ----------
+    void check_stmt_method(Scope& scope,
+                           const ast::Stmt& s,
+                           const ast::Type& expected_return,
+                           const ClassTable& ct,
+                           const std::string& class_name) const {
+        check_stmt_impl(scope, s, expected_return, &ct, &class_name);
+    }
+
+    void check_stmt_impl(Scope& scope,
+                         const ast::Stmt& s,
+                         const ast::Type& expected_return,
+                         const ClassTable* ct,
+                         const std::string* class_name) const {
         using namespace ast;
 
         if (auto* b = dynamic_cast<const BlockStmt*>(&s)) {
             Scope inner(&scope);
-            for (const auto& st : b->statements) check_stmt(inner, *st, expected_return);
+            for (const auto& st : b->statements) check_stmt_impl(inner, *st, expected_return, ct, class_name);
             return;
         }
 
         if (auto* v = dynamic_cast<const VarDeclStmt*>(&s)) {
             if (scope.has_var_local(v->name))
                 throw std::runtime_error("semantic error: variable redefinition in same scope: " + v->name);
+
+            // Shadowing forbidden in methods: local/param may not have same name as any field in chain
+            if (ct && class_name && ct->has_field_in_chain(*class_name, v->name)) {
+                throw std::runtime_error("semantic error: local shadows field in method: " + v->name);
+            }
 
             ast::Type declared = v->decl_type;
 
@@ -198,19 +219,19 @@ struct Analyzer {
         }
 
         if (auto* i = dynamic_cast<const IfStmt*>(&s)) {
-            ast::Type ct = type_of_expr(scope, *i->cond);
-            if (!is_bool_context_allowed(ct))
-                throw std::runtime_error("semantic error: if condition not convertible to bool: " + type_name(ct));
-            check_stmt(scope, *i->then_branch, expected_return);
-            if (i->else_branch) check_stmt(scope, *i->else_branch, expected_return);
+            ast::Type ct2 = type_of_expr(scope, *i->cond);
+            if (!is_bool_context_allowed(ct2))
+                throw std::runtime_error("semantic error: if condition not convertible to bool: " + type_name(ct2));
+            check_stmt_impl(scope, *i->then_branch, expected_return, ct, class_name);
+            if (i->else_branch) check_stmt_impl(scope, *i->else_branch, expected_return, ct, class_name);
             return;
         }
 
         if (auto* w = dynamic_cast<const WhileStmt*>(&s)) {
-            ast::Type ct = type_of_expr(scope, *w->cond);
-            if (!is_bool_context_allowed(ct))
-                throw std::runtime_error("semantic error: while condition not convertible to bool: " + type_name(ct));
-            check_stmt(scope, *w->body, expected_return);
+            ast::Type ct2 = type_of_expr(scope, *w->cond);
+            if (!is_bool_context_allowed(ct2))
+                throw std::runtime_error("semantic error: while condition not convertible to bool: " + type_name(ct2));
+            check_stmt_impl(scope, *w->body, expected_return, ct, class_name);
             return;
         }
 
@@ -231,6 +252,7 @@ struct Analyzer {
         throw std::runtime_error("semantic error: unknown statement node");
     }
 
+    // ---------- function check ----------
     void check_function(const Scope& global, const ast::FunctionDef& f) const {
         Scope fun_scope(const_cast<Scope*>(&global));
 
@@ -241,6 +263,34 @@ struct Analyzer {
         }
 
         check_stmt(fun_scope, *f.body, f.return_type);
+    }
+
+    // ---------- method check (NAME LOOKUP ORDER) ----------
+    void check_method(const Scope& global,
+                      const ClassTable& ct,
+                      const std::string& class_name,
+                      const ast::MethodDef& m) const {
+        // member scope: fields (own before base, derived wins by merge)
+        Scope member_scope(const_cast<Scope*>(&global));
+        auto merged = ct.merged_fields_derived_wins(class_name);
+        for (const auto& [fname, ftype] : merged) {
+            member_scope.define_var(fname, ftype);
+        }
+
+        // method scope: params + locals
+        Scope method_scope(&member_scope);
+
+        for (const auto& p : m.params) {
+            // Shadowing forbidden: param may not have same name as any field in chain
+            if (ct.has_field_in_chain(class_name, p.name)) {
+                throw std::runtime_error("semantic error: parameter shadows field in method: " + p.name);
+            }
+            if (method_scope.has_var_local(p.name))
+                throw std::runtime_error("semantic error: duplicate parameter name: " + p.name);
+            method_scope.define_var(p.name, p.type);
+        }
+
+        check_stmt_method(method_scope, *m.body, m.return_type, ct, class_name);
     }
 };
 
