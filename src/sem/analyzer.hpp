@@ -30,6 +30,56 @@ struct Analyzer {
         return b == ast::Type::Bool() || b == ast::Type::Int() || b == ast::Type::Char() || b == ast::Type::String();
     }
 
+    // ---------- overload resolution (base types + ref-bind rule + prefer ref) ----------
+    const FuncSymbol& resolve_call(const Scope& scope, const ast::CallExpr& call) const {
+        // find overload set up the scope chain
+        const Scope* s = &scope;
+        const std::vector<FuncSymbol>* overloads = nullptr;
+        while (s) {
+            auto it = s->funcs.find(call.callee);
+            if (it != s->funcs.end()) { overloads = &it->second; break; }
+            s = s->parent;
+        }
+        if (!overloads) throw std::runtime_error("semantic error: unknown function: " + call.callee);
+
+        const FuncSymbol* best = nullptr;
+        int best_score = -1;
+
+        for (const auto& cand : *overloads) {
+            if (cand.param_types.size() != call.args.size()) continue;
+
+            bool ok = true;
+            int score = 0; // tie-breaker: prefer ref params when possible
+
+            for (size_t i = 0; i < call.args.size(); ++i) {
+                ast::Type arg_t = base_type(type_of_expr(scope, *call.args[i]));
+                ast::Type par_t = cand.param_types[i];
+
+                // base types must match
+                if (base_type(par_t) != arg_t) { ok = false; break; }
+
+                // if param is ref: arg must be lvalue
+                if (par_t.is_ref) {
+                    if (!is_lvalue(*call.args[i])) { ok = false; break; }
+                    score += 1; // prefer ref overload over value overload
+                }
+            }
+
+            if (!ok) continue;
+
+            if (score > best_score) {
+                best_score = score;
+                best = &cand;
+            } else if (score == best_score) {
+                // two equally-good candidates -> ambiguous
+                throw std::runtime_error("semantic error: ambiguous overload: " + call.callee);
+            }
+        }
+
+        if (!best) throw std::runtime_error("semantic error: no matching overload: " + call.callee);
+        return *best;
+    }
+
     // ---------- expressions ----------
     ast::Type type_of_expr(const Scope& scope, const ast::Expr& e) const {
         using namespace ast;
@@ -108,22 +158,11 @@ struct Analyzer {
         }
 
         if (auto* call = dynamic_cast<const ast::CallExpr*>(&e)) {
-            const FuncSymbol& f = scope.resolve_func(call->callee, arg_types_for_call(scope, *call));
+            const FuncSymbol& f = resolve_call(scope, *call);
             return f.return_type;
         }
 
         throw std::runtime_error("semantic error: unknown expression node");
-    }
-
-    std::vector<ast::Type> arg_types_for_call(const Scope& scope, const ast::CallExpr& call) const {
-        std::vector<ast::Type> arg_types;
-        arg_types.reserve(call.args.size());
-        for (const auto& arg : call.args) {
-            ast::Type t = type_of_expr(scope, *arg);
-            t.is_ref = is_lvalue(*arg); // lvalue -> T&
-            arg_types.push_back(t);
-        }
-        return arg_types;
     }
 
     // ---------- statements ----------
