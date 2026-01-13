@@ -5,6 +5,8 @@
 
 #include "scope.hpp"
 #include "../ast/expr.hpp"
+#include "../ast/stmt.hpp"
+#include "../ast/function.hpp"
 #include "../ast/type.hpp"
 
 namespace sem {
@@ -23,6 +25,12 @@ struct Analyzer {
         return ast::to_string(t);
     }
 
+    static bool is_bool_context_allowed(const ast::Type& t) {
+        auto b = base_type(t);
+        return b == ast::Type::Bool() || b == ast::Type::Int() || b == ast::Type::Char() || b == ast::Type::String();
+    }
+
+    // ---------- expressions ----------
     ast::Type type_of_expr(const Scope& scope, const ast::Expr& e) const {
         using namespace ast;
 
@@ -99,44 +107,101 @@ struct Analyzer {
             throw std::runtime_error("semantic error: unknown binary op");
         }
 
-        if (auto* call = dynamic_cast<const CallExpr*>(&e)) {
-            if (call->callee == "print_int")    { check_builtin(scope, *call, ast::Type::Int());    return ast::Type::Int(); }
-            if (call->callee == "print_bool")   { check_builtin(scope, *call, ast::Type::Bool());   return ast::Type::Int(); }
-            if (call->callee == "print_char")   { check_builtin(scope, *call, ast::Type::Char());   return ast::Type::Int(); }
-            if (call->callee == "print_string") { check_builtin(scope, *call, ast::Type::String()); return ast::Type::Int(); }
-
-            const FuncSymbol& f = resolve_call(scope, *call);
+        if (auto* call = dynamic_cast<const ast::CallExpr*>(&e)) {
+            const FuncSymbol& f = scope.resolve_func(call->callee, arg_types_for_call(scope, *call));
             return f.return_type;
         }
 
         throw std::runtime_error("semantic error: unknown expression node");
     }
 
-    // Key change: argument types for overload resolution:
-    // lvalue -> T& ; rvalue -> T
     std::vector<ast::Type> arg_types_for_call(const Scope& scope, const ast::CallExpr& call) const {
         std::vector<ast::Type> arg_types;
         arg_types.reserve(call.args.size());
-
         for (const auto& arg : call.args) {
             ast::Type t = type_of_expr(scope, *arg);
-            t.is_ref = is_lvalue(*arg); // mark lvalues as ref for exact signature matching
+            t.is_ref = is_lvalue(*arg); // lvalue -> T&
             arg_types.push_back(t);
         }
         return arg_types;
     }
 
-    const FuncSymbol& resolve_call(const Scope& scope, const ast::CallExpr& call) const {
-        // exact match including & marker (using arg_types_for_call)
-        auto arg_types = arg_types_for_call(scope, call);
-        return scope.resolve_func(call.callee, arg_types);
+    // ---------- statements ----------
+    void check_stmt(Scope& scope, const ast::Stmt& s, const ast::Type& expected_return) const {
+        using namespace ast;
+
+        if (auto* b = dynamic_cast<const BlockStmt*>(&s)) {
+            Scope inner(&scope);
+            for (const auto& st : b->statements) check_stmt(inner, *st, expected_return);
+            return;
+        }
+
+        if (auto* v = dynamic_cast<const VarDeclStmt*>(&s)) {
+            if (scope.has_var_local(v->name))
+                throw std::runtime_error("semantic error: variable redefinition in same scope: " + v->name);
+
+            ast::Type declared = v->decl_type;
+
+            if (v->init) {
+                ast::Type init_t = type_of_expr(scope, *v->init);
+                if (base_type(declared) != base_type(init_t)) {
+                    throw std::runtime_error("semantic error: init type mismatch for " + v->name +
+                        ": declared " + type_name(declared) + ", init " + type_name(init_t));
+                }
+            }
+            scope.define_var(v->name, declared);
+            return;
+        }
+
+        if (auto* e = dynamic_cast<const ExprStmt*>(&s)) {
+            (void)type_of_expr(scope, *e->expr);
+            return;
+        }
+
+        if (auto* i = dynamic_cast<const IfStmt*>(&s)) {
+            ast::Type ct = type_of_expr(scope, *i->cond);
+            if (!is_bool_context_allowed(ct))
+                throw std::runtime_error("semantic error: if condition not convertible to bool: " + type_name(ct));
+            check_stmt(scope, *i->then_branch, expected_return);
+            if (i->else_branch) check_stmt(scope, *i->else_branch, expected_return);
+            return;
+        }
+
+        if (auto* w = dynamic_cast<const WhileStmt*>(&s)) {
+            ast::Type ct = type_of_expr(scope, *w->cond);
+            if (!is_bool_context_allowed(ct))
+                throw std::runtime_error("semantic error: while condition not convertible to bool: " + type_name(ct));
+            check_stmt(scope, *w->body, expected_return);
+            return;
+        }
+
+        if (auto* r = dynamic_cast<const ReturnStmt*>(&s)) {
+            if (expected_return == Type::Void()) {
+                if (r->value) throw std::runtime_error("semantic error: return with value in void function");
+                return;
+            }
+            if (!r->value) throw std::runtime_error("semantic error: missing return value");
+            ast::Type rt = type_of_expr(scope, *r->value);
+            if (base_type(rt) != base_type(expected_return)) {
+                throw std::runtime_error("semantic error: return type mismatch: expected " +
+                    type_name(expected_return) + ", got " + type_name(rt));
+            }
+            return;
+        }
+
+        throw std::runtime_error("semantic error: unknown statement node");
     }
 
-    void check_builtin(const Scope& scope, const ast::CallExpr& call, const ast::Type& expected) const {
-        if (call.args.size() != 1) throw std::runtime_error("semantic error: " + call.callee + " expects 1 arg");
-        ast::Type t = type_of_expr(scope, *call.args[0]);
-        if (base_type(t) != base_type(expected))
-            throw std::runtime_error("semantic error: " + call.callee + " expects " + type_name(expected));
+    void check_function(const Scope& global, const ast::FunctionDef& f) const {
+        Scope fun_scope(const_cast<Scope*>(&global));
+
+        for (const auto& p : f.params) {
+            if (fun_scope.has_var_local(p.name))
+                throw std::runtime_error("semantic error: duplicate parameter name: " + p.name);
+            fun_scope.define_var(p.name, p.type);
+        }
+
+        check_stmt(fun_scope, *f.body, f.return_type);
     }
 };
 

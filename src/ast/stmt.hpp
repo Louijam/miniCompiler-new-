@@ -2,6 +2,9 @@
 #include <memory>
 #include <vector>
 #include <optional>
+#include <string>
+
+#include "type.hpp"
 
 namespace ast {
 
@@ -22,9 +25,9 @@ struct ExprStmt : Stmt {
 };
 
 struct VarDeclStmt : Stmt {
+    Type decl_type;           // <-- NEU: deklarierter Typ (z.B. int, bool, T&, ...)
     std::string name;
-    // optional initializer expression
-    std::unique_ptr<Expr> init;
+    std::unique_ptr<Expr> init; // optional initializer expression
 };
 
 struct IfStmt : Stmt {
