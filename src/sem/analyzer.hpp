@@ -15,13 +15,17 @@
 namespace sem {
 
 struct Analyzer {
+    const ClassTable* ct = nullptr;
+
+    void set_class_table(const ClassTable* t) { ct = t; }
+
     static bool is_lvalue(const ast::Expr& e) {
-        return dynamic_cast<const ast::VarExpr*>(&e) != nullptr;
+        return dynamic_cast<const ast::VarExpr*>(&e) != nullptr
+            || dynamic_cast<const ast::MemberAccessExpr*>(&e) != nullptr;
     }
 
     static ast::Type base_type(ast::Type t) {
-        t.is_ref = false;
-        return t;
+        return ast::strip_ref(t);
     }
 
     static std::string type_name(const ast::Type& t) {
@@ -33,7 +37,15 @@ struct Analyzer {
         return b == ast::Type::Bool() || b == ast::Type::Int() || b == ast::Type::Char() || b == ast::Type::String();
     }
 
-    // ---------- overload resolution (base types + ref-bind rule + prefer ref) ----------
+    static std::string class_name_of(const ast::Type& t) {
+        ast::Type b = base_type(t);
+        if (b.base != ast::Type::Base::Class) {
+            throw std::runtime_error("semantic error: expected class type, got " + type_name(t));
+        }
+        return b.class_name;
+    }
+
+    // ---------- overload resolution (functions) ----------
     const FuncSymbol& resolve_call(const Scope& scope, const ast::CallExpr& call) const {
         const Scope* s = &scope;
         const std::vector<FuncSymbol>* overloads = nullptr;
@@ -103,6 +115,36 @@ struct Analyzer {
             return rhs_t;
         }
 
+        if (auto* m = dynamic_cast<const MemberAccessExpr*>(&e)) {
+            if (!ct) throw std::runtime_error("semantic error: internal: class table not set");
+            ast::Type obj_t = type_of_expr(scope, *m->object);
+            std::string cn = class_name_of(obj_t);
+
+            if (!ct->has_field_in_chain(cn, m->field)) {
+                throw std::runtime_error("semantic error: unknown field: " + cn + "." + m->field);
+            }
+            return ct->field_type_in_chain(cn, m->field);
+        }
+
+        if (auto* mc = dynamic_cast<const MethodCallExpr*>(&e)) {
+            if (!ct) throw std::runtime_error("semantic error: internal: class table not set");
+            ast::Type obj_t = type_of_expr(scope, *mc->object);
+            std::string cn = class_name_of(obj_t);
+
+            std::vector<ast::Type> arg_base;
+            std::vector<bool> arg_lv;
+            arg_base.reserve(mc->args.size());
+            arg_lv.reserve(mc->args.size());
+
+            for (const auto& a2 : mc->args) {
+                arg_base.push_back(base_type(type_of_expr(scope, *a2)));
+                arg_lv.push_back(is_lvalue(*a2));
+            }
+
+            const auto& chosen = ct->resolve_method_call(cn, mc->method, arg_base, arg_lv);
+            return chosen.return_type;
+        }
+
         if (auto* u = dynamic_cast<const UnaryExpr*>(&e)) {
             ast::Type t = type_of_expr(scope, *u->expr);
 
@@ -164,41 +206,19 @@ struct Analyzer {
         throw std::runtime_error("semantic error: unknown expression node");
     }
 
-    // ---------- statements (normal functions) ----------
+    // ---------- statements ----------
     void check_stmt(Scope& scope, const ast::Stmt& s, const ast::Type& expected_return) const {
-        check_stmt_impl(scope, s, expected_return, nullptr, nullptr);
-    }
-
-    // ---------- statements (methods) ----------
-    void check_stmt_method(Scope& scope,
-                           const ast::Stmt& s,
-                           const ast::Type& expected_return,
-                           const ClassTable& ct,
-                           const std::string& class_name) const {
-        check_stmt_impl(scope, s, expected_return, &ct, &class_name);
-    }
-
-    void check_stmt_impl(Scope& scope,
-                         const ast::Stmt& s,
-                         const ast::Type& expected_return,
-                         const ClassTable* ct,
-                         const std::string* class_name) const {
         using namespace ast;
 
         if (auto* b = dynamic_cast<const BlockStmt*>(&s)) {
             Scope inner(&scope);
-            for (const auto& st : b->statements) check_stmt_impl(inner, *st, expected_return, ct, class_name);
+            for (const auto& st : b->statements) check_stmt(inner, *st, expected_return);
             return;
         }
 
         if (auto* v = dynamic_cast<const VarDeclStmt*>(&s)) {
             if (scope.has_var_local(v->name))
                 throw std::runtime_error("semantic error: variable redefinition in same scope: " + v->name);
-
-            // Shadowing forbidden in methods: local/param may not have same name as any field in chain
-            if (ct && class_name && ct->has_field_in_chain(*class_name, v->name)) {
-                throw std::runtime_error("semantic error: local shadows field in method: " + v->name);
-            }
 
             ast::Type declared = v->decl_type;
 
@@ -222,8 +242,8 @@ struct Analyzer {
             ast::Type ct2 = type_of_expr(scope, *i->cond);
             if (!is_bool_context_allowed(ct2))
                 throw std::runtime_error("semantic error: if condition not convertible to bool: " + type_name(ct2));
-            check_stmt_impl(scope, *i->then_branch, expected_return, ct, class_name);
-            if (i->else_branch) check_stmt_impl(scope, *i->else_branch, expected_return, ct, class_name);
+            check_stmt(scope, *i->then_branch, expected_return);
+            if (i->else_branch) check_stmt(scope, *i->else_branch, expected_return);
             return;
         }
 
@@ -231,7 +251,7 @@ struct Analyzer {
             ast::Type ct2 = type_of_expr(scope, *w->cond);
             if (!is_bool_context_allowed(ct2))
                 throw std::runtime_error("semantic error: while condition not convertible to bool: " + type_name(ct2));
-            check_stmt_impl(scope, *w->body, expected_return, ct, class_name);
+            check_stmt(scope, *w->body, expected_return);
             return;
         }
 
@@ -252,7 +272,6 @@ struct Analyzer {
         throw std::runtime_error("semantic error: unknown statement node");
     }
 
-    // ---------- function check ----------
     void check_function(const Scope& global, const ast::FunctionDef& f) const {
         Scope fun_scope(const_cast<Scope*>(&global));
 
@@ -265,24 +284,18 @@ struct Analyzer {
         check_stmt(fun_scope, *f.body, f.return_type);
     }
 
-    // ---------- method check (NAME LOOKUP ORDER) ----------
     void check_method(const Scope& global,
-                      const ClassTable& ct,
+                      const ClassTable& ctab,
                       const std::string& class_name,
                       const ast::MethodDef& m) const {
-        // member scope: fields (own before base, derived wins by merge)
         Scope member_scope(const_cast<Scope*>(&global));
-        auto merged = ct.merged_fields_derived_wins(class_name);
-        for (const auto& [fname, ftype] : merged) {
-            member_scope.define_var(fname, ftype);
-        }
+        auto merged = ctab.merged_fields_derived_wins(class_name);
+        for (const auto& [fname, ftype] : merged) member_scope.define_var(fname, ftype);
 
-        // method scope: params + locals
         Scope method_scope(&member_scope);
 
         for (const auto& p : m.params) {
-            // Shadowing forbidden: param may not have same name as any field in chain
-            if (ct.has_field_in_chain(class_name, p.name)) {
+            if (ctab.has_field_in_chain(class_name, p.name)) {
                 throw std::runtime_error("semantic error: parameter shadows field in method: " + p.name);
             }
             if (method_scope.has_var_local(p.name))
@@ -290,7 +303,7 @@ struct Analyzer {
             method_scope.define_var(p.name, p.type);
         }
 
-        check_stmt_method(method_scope, *m.body, m.return_type, ct, class_name);
+        check_stmt(method_scope, *m.body, m.return_type);
     }
 };
 
