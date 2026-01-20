@@ -62,43 +62,14 @@ struct ClassTable {
         return it->second;
     }
 
-    const MethodSymbol* find_exact_in_chain(const std::string& class_name, const MethodSymbol& wanted) const {
-        const ClassSymbol* cur = &get_class(class_name);
-        while (cur) {
-            auto it = cur->methods.find(wanted.name);
-            if (it != cur->methods.end()) {
-                for (const auto& cand : it->second) {
-                    if (same_params(cand.param_types, wanted.param_types)) return &cand;
-                }
-            }
-            if (cur->base_name.empty()) break;
+    bool is_same_or_derived(const std::string& derived, const std::string& base) const {
+        if (derived == base) return true;
+        const ClassSymbol* cur = &get_class(derived);
+        while (cur && !cur->base_name.empty()) {
+            if (cur->base_name == base) return true;
             cur = &get_class(cur->base_name);
         }
-        return nullptr;
-    }
-
-    const MethodSymbol* find_exact_in_chain(const std::string& class_name,
-                                            const std::string& method_name,
-                                            const std::vector<ast::Type>& param_types) const {
-        const ClassSymbol* cur = &get_class(class_name);
-        while (cur) {
-            auto it = cur->methods.find(method_name);
-            if (it != cur->methods.end()) {
-                for (const auto& cand : it->second) {
-                    if (same_params(cand.param_types, param_types)) return &cand;
-                }
-            }
-            if (cur->base_name.empty()) break;
-            cur = &get_class(cur->base_name);
-        }
-        return nullptr;
-    }
-
-    bool is_virtual_in_chain(const std::string& class_name,
-                             const std::string& method_name,
-                             const std::vector<ast::Type>& param_types) const {
-        const MethodSymbol* m = find_exact_in_chain(class_name, method_name, param_types);
-        return m ? m->is_virtual : false;
+        return false;
     }
 
     void fill_class_members(const ast::ClassDef& c) {
@@ -119,17 +90,6 @@ struct ClassTable {
 
             ms.param_types.reserve(m.params.size());
             for (const auto& p : m.params) ms.param_types.push_back(p.type);
-
-            // virtual inheritance + override return type check
-            if (!cs.base_name.empty()) {
-                const MethodSymbol* bm = find_exact_in_chain(cs.base_name, ms);
-                if (bm) {
-                    if (bm->return_type != ms.return_type) {
-                        throw std::runtime_error("semantic error: override return type mismatch in class " + c.name + " for method " + m.name);
-                    }
-                    if (bm->is_virtual) ms.is_virtual = true;
-                }
-            }
 
             auto& vec = cs.methods[ms.name];
             for (const auto& existing : vec) {
@@ -167,6 +127,21 @@ struct ClassTable {
         for (const auto& [name, _] : classes) dfs(dfs, name);
     }
 
+    const MethodSymbol* find_exact_in_chain(const std::string& class_name, const MethodSymbol& wanted) const {
+        const ClassSymbol* cur = &get_class(class_name);
+        while (cur) {
+            auto it = cur->methods.find(wanted.name);
+            if (it != cur->methods.end()) {
+                for (const auto& cand : it->second) {
+                    if (same_params(cand.param_types, wanted.param_types)) return &cand;
+                }
+            }
+            if (cur->base_name.empty()) break;
+            cur = &get_class(cur->base_name);
+        }
+        return nullptr;
+    }
+
     void check_overrides_and_virtuals() const {
         for (const auto& [name, cs] : classes) {
             if (cs.base_name.empty()) continue;
@@ -184,7 +159,6 @@ struct ClassTable {
         }
     }
 
-    // ---- fields in chain ----
     bool has_field_in_chain(const std::string& class_name, const std::string& field) const {
         const ClassSymbol* cur = &get_class(class_name);
         while (cur) {
@@ -219,8 +193,6 @@ struct ClassTable {
         return out;
     }
 
-    // ---- resolve method call on static class type (with overload rules) ----
-    // Rules: exact base-type match, ref params require lvalue args, prefer ref overload
     const MethodSymbol& resolve_method_call(const std::string& static_class,
                                            const std::string& method,
                                            const std::vector<ast::Type>& arg_base_types,

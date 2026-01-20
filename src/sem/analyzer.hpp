@@ -25,7 +25,8 @@ struct Analyzer {
     }
 
     static ast::Type base_type(ast::Type t) {
-        return ast::strip_ref(t);
+        t.is_ref = false;
+        return t;
     }
 
     static std::string type_name(const ast::Type& t) {
@@ -37,12 +38,38 @@ struct Analyzer {
         return b == ast::Type::Bool() || b == ast::Type::Int() || b == ast::Type::Char() || b == ast::Type::String();
     }
 
-    static std::string class_name_of(const ast::Type& t) {
-        ast::Type b = base_type(t);
+    std::string class_name_of(const ast::Type& t) const {
+        auto b = base_type(t);
         if (b.base != ast::Type::Base::Class) {
             throw std::runtime_error("semantic error: expected class type, got " + type_name(t));
         }
         return b.class_name;
+    }
+
+    bool class_compatible_for_copy(const ast::Type& dst, const ast::Type& src) const {
+        if (base_type(dst).base != ast::Type::Base::Class) return false;
+        if (base_type(src).base != ast::Type::Base::Class) return false;
+        if (!ct) throw std::runtime_error("semantic error: internal: class table not set");
+        std::string d = base_type(dst).class_name;
+        std::string s = base_type(src).class_name;
+        return ct->is_same_or_derived(s, d); // src derived -> dst base allowed (slicing)
+    }
+
+    bool ref_compatible_for_bind(const ast::Type& dst_ref, const ast::Type& src, const ast::Expr& init_expr) const {
+        if (!dst_ref.is_ref) return false;
+        if (!is_lvalue(init_expr)) return false;
+
+        ast::Type D = base_type(dst_ref);
+        ast::Type S = base_type(src);
+
+        if (D == S) return true;
+
+        if (D.base == ast::Type::Base::Class && S.base == ast::Type::Base::Class) {
+            if (!ct) throw std::runtime_error("semantic error: internal: class table not set");
+            return ct->is_same_or_derived(S.class_name, D.class_name);
+        }
+
+        return false;
     }
 
     // ---------- overload resolution (functions) ----------
@@ -108,9 +135,12 @@ struct Analyzer {
             const auto& lhs = scope.lookup_var(a->name);
             ast::Type rhs_t = type_of_expr(scope, *a->value);
 
+            // allow Base = Derived (slicing) for classes
             if (base_type(lhs.type) != base_type(rhs_t)) {
-                throw std::runtime_error("semantic error: assignment type mismatch: " +
-                    lhs.name + " is " + type_name(lhs.type) + ", rhs is " + type_name(rhs_t));
+                if (!class_compatible_for_copy(lhs.type, rhs_t)) {
+                    throw std::runtime_error("semantic error: assignment type mismatch: " +
+                        lhs.name + " is " + type_name(lhs.type) + ", rhs is " + type_name(rhs_t));
+                }
             }
             return rhs_t;
         }
@@ -222,13 +252,31 @@ struct Analyzer {
 
             ast::Type declared = v->decl_type;
 
-            if (v->init) {
+            if (declared.is_ref) {
+                if (!v->init)
+                    throw std::runtime_error("semantic error: reference variable requires initializer: " + v->name);
                 ast::Type init_t = type_of_expr(scope, *v->init);
-                if (base_type(declared) != base_type(init_t)) {
+
+                if (!ref_compatible_for_bind(declared, init_t, *v->init)) {
                     throw std::runtime_error("semantic error: init type mismatch for " + v->name +
                         ": declared " + type_name(declared) + ", init " + type_name(init_t));
                 }
+
+                scope.define_var(v->name, declared);
+                return;
             }
+
+            if (v->init) {
+                ast::Type init_t = type_of_expr(scope, *v->init);
+
+                if (base_type(declared) != base_type(init_t)) {
+                    if (!class_compatible_for_copy(declared, init_t)) {
+                        throw std::runtime_error("semantic error: init type mismatch for " + v->name +
+                            ": declared " + type_name(declared) + ", init " + type_name(init_t));
+                    }
+                }
+            }
+
             scope.define_var(v->name, declared);
             return;
         }
