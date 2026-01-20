@@ -1,167 +1,33 @@
 #include <iostream>
-#include <cstdlib>
-#include <memory>
-#include <vector>
+#include <fstream>
+#include <sstream>
+#include <string>
 
-#include "interp/env.hpp"
-#include "interp/exec.hpp"
-#include "interp/functions.hpp"
-#include "ast/expr.hpp"
-#include "ast/stmt.hpp"
-#include "ast/type.hpp"
-#include "ast/function.hpp"
+#include "repl/repl.hpp"
+#include "repl/preprocess.hpp"
 
-static ast::ExprPtr make_int(int v) { return std::make_unique<ast::IntLiteral>(v); }
-
-static std::unique_ptr<ast::BinaryExpr> make_bin(ast::BinaryExpr::Op op, ast::ExprPtr lhs, ast::ExprPtr rhs) {
-    auto b = std::make_unique<ast::BinaryExpr>();
-    b->op = op;
-    b->left = std::move(lhs);
-    b->right = std::move(rhs);
-    return b;
+static std::string read_file_or_throw(const std::string& path) {
+    std::ifstream in(path);
+    if (!in) throw std::runtime_error("Konnte Datei nicht oeffnen: " + path);
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    return ss.str();
 }
 
-static ast::ExprPtr make_var(const std::string& name) { return std::make_unique<ast::VarExpr>(name); }
+int main(int argc, char** argv) {
+    try {
+        if (argc > 1) {
+            std::string src = read_file_or_throw(argv[1]);
+            std::string stripped = repl::strip_preprocessor_lines(src);
 
-static std::unique_ptr<ast::AssignExpr> make_assign(const std::string& name, ast::ExprPtr rhs) {
-    auto a = std::make_unique<ast::AssignExpr>();
-    a->name = name;
-    a->value = std::move(rhs);
-    return a;
-}
+            // Spaeter: stripped -> parse -> sem -> exec
+            std::cout << "TODO file parse+exec (nach preprocess). Laenge vorher/nachher: "
+                      << src.size() << "/" << stripped.size() << "\n";
+        }
 
-static std::unique_ptr<ast::VarDeclStmt> make_vardecl(const ast::Type& t, const std::string& name, ast::ExprPtr init) {
-    auto s = std::make_unique<ast::VarDeclStmt>();
-    s->decl_type = t;
-    s->name = name;
-    s->init = std::move(init);
-    return s;
-}
-
-static std::unique_ptr<ast::ExprStmt> make_exprstmt(ast::ExprPtr e) {
-    auto s = std::make_unique<ast::ExprStmt>();
-    s->expr = std::move(e);
-    return s;
-}
-
-static std::unique_ptr<ast::ReturnStmt> make_return(ast::ExprPtr e) {
-    auto r = std::make_unique<ast::ReturnStmt>();
-    r->value = std::move(e);
-    return r;
-}
-
-static std::unique_ptr<ast::BlockStmt> make_block(std::vector<std::unique_ptr<ast::Stmt>> stmts) {
-    auto b = std::make_unique<ast::BlockStmt>();
-    b->statements = std::move(stmts);
-    return b;
-}
-
-static std::unique_ptr<ast::CallExpr> make_call(const std::string& name, std::vector<ast::ExprPtr> args) {
-    auto c = std::make_unique<ast::CallExpr>();
-    c->callee = name;
-    c->args = std::move(args);
-    return c;
-}
-
-static void expect_int_var(interp::Env& env, const std::string& name, int expected, const char* testname) {
-    interp::Value v = env.read_value(name);
-    auto* pi = std::get_if<int>(&v);
-    if (!pi || *pi != expected) {
-        std::cerr << "TEST FAIL: " << testname << " expected " << name << " == " << expected << "\n";
-        std::exit(1);
+        return repl::run_repl();
+    } catch (const std::exception& ex) {
+        std::cerr << "FEHLER: " << ex.what() << "\n";
+        return 1;
     }
-}
-
-static void expect_int_value(const interp::Value& v, int expected, const char* testname) {
-    auto* pi = std::get_if<int>(&v);
-    if (!pi || *pi != expected) {
-        std::cerr << "TEST FAIL: " << testname << " expected value == " << expected << "\n";
-        std::exit(1);
-    }
-}
-
-int main() {
-    using namespace ast;
-    using namespace interp;
-
-    Env env(nullptr);
-    FunctionTable functions;
-
-    Type t_int = Type::Int(false);
-    Type t_int_ref = Type::Int(true);
-
-    // int inc(int a) { return a + 1; }
-    std::vector<std::unique_ptr<FunctionDef>> owned;
-    {
-        auto f = std::make_unique<FunctionDef>();
-        f->name = "inc";
-        f->return_type = t_int;
-        f->params = { Param{"a", t_int} };
-
-        std::vector<std::unique_ptr<Stmt>> body;
-        body.push_back(make_return(make_bin(BinaryExpr::Op::Add, make_var("a"), make_int(1))));
-        f->body = make_block(std::move(body));
-
-        functions.add(*f);
-        owned.push_back(std::move(f));
-    }
-
-    // int inc(int& a) { a = a + 1; return a; }
-    {
-        auto f = std::make_unique<FunctionDef>();
-        f->name = "inc";
-        f->return_type = t_int;
-        f->params = { Param{"a", t_int_ref} };
-
-        std::vector<std::unique_ptr<Stmt>> body;
-        body.push_back(make_exprstmt(make_assign("a", make_bin(BinaryExpr::Op::Add, make_var("a"), make_int(1)))));
-        body.push_back(make_return(make_var("a")));
-        f->body = make_block(std::move(body));
-
-        functions.add(*f);
-        owned.push_back(std::move(f));
-    }
-
-    // int x = 10;
-    exec_stmt(env, *make_vardecl(t_int, "x", make_int(10)), functions);
-    expect_int_var(env, "x", 10, "vardecl");
-    std::cout << "OK: vardecl\n";
-
-    // print_int(x);
-    {
-        std::vector<ExprPtr> args;
-        args.push_back(make_var("x"));
-        (void)eval_expr(env, *make_call("print_int", std::move(args)), functions);
-        std::cout << "OK: builtin print_int\n";
-    }
-
-    // inc(5) -> 6
-    {
-        std::vector<ExprPtr> args;
-        args.push_back(make_int(5));
-        Value v = eval_expr(env, *make_call("inc", std::move(args)), functions);
-        expect_int_value(v, 6, "inc(5)");
-        std::cout << "OK: call inc(5)\n";
-    }
-
-    // inc(x) -> 11 und x wird 11
-    {
-        std::vector<ExprPtr> args;
-        args.push_back(make_var("x"));
-        Value v = eval_expr(env, *make_call("inc", std::move(args)), functions);
-        expect_int_value(v, 11, "inc(x)");
-        expect_int_var(env, "x", 11, "inc(x) mut");
-        std::cout << "OK: call inc(x)\n";
-    }
-
-    // print_int(x); (soll 11 drucken)
-    {
-        std::vector<ExprPtr> args;
-        args.push_back(make_var("x"));
-        (void)eval_expr(env, *make_call("print_int", std::move(args)), functions);
-        std::cout << "OK: builtin print_int after mutation\n";
-    }
-
-    std::cout << "ALLE TESTS OK\n";
-    return 0;
 }
