@@ -46,6 +46,8 @@ struct ProgramAnalyzer {
         // PASS 3: overrides
         ct.check_overrides_and_virtuals();
 
+        analyzer.set_class_table(&ct);
+
         // PASS 1: function signatures
         for (const auto& f : p.functions) {
             FuncSymbol sym;
@@ -59,15 +61,11 @@ struct ProgramAnalyzer {
         check_main_signature(global);
 
         // PASS 2: function bodies
-        for (const auto& f : p.functions) {
-            analyzer.check_function(global, f);
-        }
+        for (const auto& f : p.functions) analyzer.check_function(global, f);
 
-        // PASS 4: method bodies (name lookup order inside methods)
+        // PASS 4: method bodies
         for (const auto& c : p.classes) {
-            for (const auto& m : c.methods) {
-                analyzer.check_method(global, ct, c.name, m);
-            }
+            for (const auto& m : c.methods) analyzer.check_method(global, ct, c.name, m);
         }
     }
 };

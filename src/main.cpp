@@ -7,34 +7,57 @@
 #include "ast/expr.hpp"
 #include "ast/type.hpp"
 
-static ast::MethodDef make_ok_method_uses_field_y() {
+static ast::MethodDef make_m_int_returns_int() {
     using namespace ast;
     MethodDef m;
     m.name = "m";
     m.return_type = Type::Int();
+    m.params.push_back(Param{"x", Type::Int(false)});
 
-    // { return y; }  (y is a field)
     auto body = std::make_unique<BlockStmt>();
     auto ret = std::make_unique<ReturnStmt>();
-    ret->value = std::make_unique<VarExpr>("y");
+    ret->value = std::make_unique<VarExpr>("x");
     body->statements.push_back(std::move(ret));
     m.body = std::move(body);
     return m;
 }
 
-static ast::MethodDef make_bad_method_param_shadows_field() {
+static ast::FunctionDef make_test_func() {
     using namespace ast;
-    MethodDef m;
-    m.name = "bad";
-    m.return_type = Type::Int();
-    m.params.push_back(Param{"y", Type::Int(false)}); // shadows field y -> must error
+
+    // int test() { A a; int t = a.y; return a.m(5); }
+    FunctionDef f;
+    f.name = "test";
+    f.return_type = Type::Int();
 
     auto body = std::make_unique<BlockStmt>();
+
+    auto decl_a = std::make_unique<VarDeclStmt>();
+    decl_a->decl_type = Type::Class("A"); // requires your Type supports Class(name)
+    decl_a->name = "a";
+    body->statements.push_back(std::move(decl_a));
+
+    auto mem = std::make_unique<MemberAccessExpr>();
+    mem->object = std::make_unique<VarExpr>("a");
+    mem->field = "y";
+
+    auto decl_t = std::make_unique<VarDeclStmt>();
+    decl_t->decl_type = Type::Int();
+    decl_t->name = "t";
+    decl_t->init = std::move(mem);
+    body->statements.push_back(std::move(decl_t));
+
+    auto call = std::make_unique<MethodCallExpr>();
+    call->object = std::make_unique<VarExpr>("a");
+    call->method = "m";
+    call->args.push_back(std::make_unique<IntLiteral>(5));
+
     auto ret = std::make_unique<ReturnStmt>();
-    ret->value = std::make_unique<VarExpr>("y");
+    ret->value = std::move(call);
     body->statements.push_back(std::move(ret));
-    m.body = std::move(body);
-    return m;
+
+    f.body = std::move(body);
+    return f;
 }
 
 int main() {
@@ -47,32 +70,16 @@ int main() {
         ClassDef A;
         A.name = "A";
         A.fields.push_back(FieldDecl{Type::Int(), "y"});
-        A.methods.push_back(make_ok_method_uses_field_y());
+        A.methods.push_back(make_m_int_returns_int());
 
         p.classes.push_back(std::move(A));
+        p.functions.push_back(make_test_func());
 
         ProgramAnalyzer pa;
         pa.analyze(p);
         std::cout << "ok\n";
     } catch (const std::exception& ex) {
         std::cout << "error=" << ex.what() << "\n";
-    }
-
-    try {
-        Program p2;
-
-        ClassDef A;
-        A.name = "A";
-        A.fields.push_back(FieldDecl{Type::Int(), "y"});
-        A.methods.push_back(make_bad_method_param_shadows_field());
-
-        p2.classes.push_back(std::move(A));
-
-        ProgramAnalyzer pa;
-        pa.analyze(p2);
-        std::cout << "NO_ERROR\n";
-    } catch (const std::exception& ex) {
-        std::cout << "error2=" << ex.what() << "\n";
     }
 
     return 0;
