@@ -131,7 +131,7 @@ inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions) {
         return rhs;
     }
 
-    if (auto* m = dynamic_cast<const MemberAccessExpr*>(&e)) {
+    if (dynamic_cast<const MemberAccessExpr*>(&e)) {
         LValue lv = eval_lvalue(env, e, functions);
         return env.read_lvalue(lv);
     }
