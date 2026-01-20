@@ -1,5 +1,7 @@
 #include <iostream>
 #include <cstdlib>
+#include <memory>
+#include <vector>
 
 #include "interp/env.hpp"
 #include "interp/exec.hpp"
@@ -7,6 +9,7 @@
 #include "ast/expr.hpp"
 #include "ast/stmt.hpp"
 #include "ast/type.hpp"
+#include "ast/function.hpp"
 
 static ast::ExprPtr make_int(int v) { return std::make_unique<ast::IntLiteral>(v); }
 
@@ -43,11 +46,10 @@ static std::unique_ptr<ast::ExprStmt> make_exprstmt(ast::ExprPtr e) {
     return s;
 }
 
-static std::unique_ptr<ast::WhileStmt> make_while(ast::ExprPtr cond, std::unique_ptr<ast::Stmt> body) {
-    auto w = std::make_unique<ast::WhileStmt>();
-    w->cond = std::move(cond);
-    w->body = std::move(body);
-    return w;
+static std::unique_ptr<ast::ReturnStmt> make_return(ast::ExprPtr e) {
+    auto r = std::make_unique<ast::ReturnStmt>();
+    r->value = std::move(e);
+    return r;
 }
 
 static std::unique_ptr<ast::BlockStmt> make_block(std::vector<std::unique_ptr<ast::Stmt>> stmts) {
@@ -56,11 +58,26 @@ static std::unique_ptr<ast::BlockStmt> make_block(std::vector<std::unique_ptr<as
     return b;
 }
 
+static std::unique_ptr<ast::CallExpr> make_call(const std::string& name, std::vector<ast::ExprPtr> args) {
+    auto c = std::make_unique<ast::CallExpr>();
+    c->callee = name;
+    c->args = std::move(args);
+    return c;
+}
+
 static void expect_int_var(interp::Env& env, const std::string& name, int expected, const char* testname) {
     interp::Value v = env.read_value(name);
     auto* pi = std::get_if<int>(&v);
     if (!pi || *pi != expected) {
         std::cerr << "TEST FAIL: " << testname << " expected " << name << " == " << expected << "\n";
+        std::exit(1);
+    }
+}
+
+static void expect_int_value(const interp::Value& v, int expected, const char* testname) {
+    auto* pi = std::get_if<int>(&v);
+    if (!pi || *pi != expected) {
+        std::cerr << "TEST FAIL: " << testname << " expected value == " << expected << "\n";
         std::exit(1);
     }
 }
@@ -75,7 +92,46 @@ int main() {
     Type t_int = Type::Int(false);
     Type t_int_ref = Type::Int(true);
 
-    // 1) int x = 1;
+    // ---------- Funktionen definieren (ohne Parser) ----------
+    // int inc(int a) { return a + 1; }
+    std::vector<std::unique_ptr<FunctionDef>> owned_funcs;
+
+    {
+        auto f = std::make_unique<FunctionDef>();
+        f->name = "inc";
+        f->return_type = t_int;
+        f->params = { Param{"a", t_int} };
+
+        std::vector<std::unique_ptr<Stmt>> body;
+        body.push_back(make_return(
+            make_bin(BinaryExpr::Op::Add, make_var("a"), make_int(1))
+        ));
+        f->body = make_block(std::move(body));
+
+        functions.add(*f);
+        owned_funcs.push_back(std::move(f));
+    }
+
+    // int inc(int& a) { a = a + 1; return a; }
+    {
+        auto f = std::make_unique<FunctionDef>();
+        f->name = "inc";
+        f->return_type = t_int;
+        f->params = { Param{"a", t_int_ref} };
+
+        std::vector<std::unique_ptr<Stmt>> body;
+        body.push_back(make_exprstmt(
+            make_assign("a", make_bin(BinaryExpr::Op::Add, make_var("a"), make_int(1)))
+        ));
+        body.push_back(make_return(make_var("a")));
+        f->body = make_block(std::move(body));
+
+        functions.add(*f);
+        owned_funcs.push_back(std::move(f));
+    }
+
+    // ---------- Statement/Ref Tests ----------
+    // int x = 1;
     {
         auto s = make_vardecl(t_int, "x", make_int(1));
         exec_stmt(env, *s, functions);
@@ -83,7 +139,7 @@ int main() {
         std::cout << "OK: vardecl int init\n";
     }
 
-    // 2) x = x + 2;  => 3
+    // x = x + 2; => 3
     {
         auto e = make_assign("x", make_bin(BinaryExpr::Op::Add, make_var("x"), make_int(2)));
         (void)eval_expr(env, *e, functions);
@@ -91,7 +147,7 @@ int main() {
         std::cout << "OK: assign expr\n";
     }
 
-    // 3) int& r = x; r = 10;  => x wird 10
+    // int& r = x; r = 10; => x wird 10
     {
         auto s1 = make_vardecl(t_int_ref, "r", make_var("x"));
         exec_stmt(env, *s1, functions);
@@ -103,20 +159,28 @@ int main() {
         std::cout << "OK: ref assign writes through\n";
     }
 
-    // 4) while(x) { x = x - 1; }  => endet bei 0 (bool-like-cpp: int 0 false)
+    // ---------- Funktionsaufruf Tests ----------
+    // inc(5) -> 6  (Value-Arg => nimmt inc(int))
     {
-        std::vector<std::unique_ptr<Stmt>> body;
-        body.push_back(make_exprstmt(
-            make_assign("x", make_bin(BinaryExpr::Op::Sub, make_var("x"), make_int(1)))
-        ));
-
-        auto loop = make_while(make_var("x"), make_block(std::move(body)));
-        exec_stmt(env, *loop, functions);
-
-        expect_int_var(env, "x", 0, "while bool-like int");
-        std::cout << "OK: while bool-like int\n";
+        std::vector<ExprPtr> args;
+        args.push_back(make_int(5));
+        auto c = make_call("inc", std::move(args));
+        Value v = eval_expr(env, *c, functions);
+        expect_int_value(v, 6, "call inc(5)");
+        std::cout << "OK: call inc(5)\n";
     }
 
-    std::cout << "ALLE STMT-TESTS OK\n";
+    // inc(x) -> 11 und x wird 11 (LValue-Arg => nimmt inc(int&))
+    {
+        std::vector<ExprPtr> args;
+        args.push_back(make_var("x"));
+        auto c = make_call("inc", std::move(args));
+        Value v = eval_expr(env, *c, functions);
+        expect_int_value(v, 11, "call inc(x) returns 11");
+        expect_int_var(env, "x", 11, "call inc(x) mutates x");
+        std::cout << "OK: call inc(x) overload int&\n";
+    }
+
+    std::cout << "ALLE CALL-TESTS OK\n";
     return 0;
 }

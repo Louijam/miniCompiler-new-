@@ -3,6 +3,7 @@
 #include <vector>
 #include <iostream>
 #include <string>
+#include <utility>
 
 #include "env.hpp"
 #include "functions.hpp"
@@ -46,7 +47,33 @@ inline const std::string& expect_string(const Value& v, const char* ctx) {
     throw std::runtime_error(std::string("type error: expected string in ") + ctx);
 }
 
+inline ast::Type type_of_value(const Value& v) {
+    if (std::holds_alternative<bool>(v)) return ast::Type::Bool(false);
+    if (std::holds_alternative<int>(v)) return ast::Type::Int(false);
+    if (std::holds_alternative<char>(v)) return ast::Type::Char(false);
+    if (std::holds_alternative<std::string>(v)) return ast::Type::String(false);
+    if (auto* po = std::get_if<ObjectPtr>(&v)) {
+        if (!*po) throw std::runtime_error("null object has no type");
+        return ast::Type::Class((*po)->dynamic_class, false);
+    }
+    throw std::runtime_error("unknown runtime value type");
+}
+
+inline Value default_value_for(const ast::Type& t) {
+    switch (t.base) {
+        case ast::Type::Base::Bool:   return Value{false};
+        case ast::Type::Base::Int:    return Value{0};
+        case ast::Type::Base::Char:   return Value{'\0'};
+        case ast::Type::Base::String: return Value{std::string("")};
+        case ast::Type::Base::Void:   return Value{0};
+        case ast::Type::Base::Class:
+            throw std::runtime_error("default_value_for(Class) not implemented yet");
+    }
+    return Value{0};
+}
+
 inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions);
+inline void exec_stmt(Env& env, const ast::Stmt& s, FunctionTable& functions); // <-- FIX: forward decl
 
 inline LValue eval_lvalue(Env& env, const ast::Expr& e, FunctionTable& functions) {
     using namespace ast;
@@ -63,6 +90,54 @@ inline LValue eval_lvalue(Env& env, const ast::Expr& e, FunctionTable& functions
     }
 
     throw std::runtime_error("expected lvalue");
+}
+
+inline ast::Type arg_type_for_call(Env& env, const ast::Expr& arg, FunctionTable& functions) {
+    if (auto* v = dynamic_cast<const ast::VarExpr*>(&arg)) {
+        ast::Type t = ast::strip_ref(env.static_type_of(v->name));
+        t.is_ref = true;
+        return t;
+    }
+
+    if (dynamic_cast<const ast::MemberAccessExpr*>(&arg)) {
+        LValue lv = eval_lvalue(env, arg, functions);
+        Value vv = env.read_lvalue(lv);
+        ast::Type t = type_of_value(vv);
+        t.is_ref = true;
+        return t;
+    }
+
+    Value vv = eval_expr(env, arg, functions);
+    return type_of_value(vv);
+}
+
+inline Value call_function(Env& caller_env, ast::FunctionDef& f,
+                           const ast::CallExpr& call, FunctionTable& functions) {
+    if (f.params.size() != call.args.size())
+        throw std::runtime_error("arity mismatch calling " + f.name);
+
+    Env callee_env(&caller_env);
+
+    for (size_t i = 0; i < call.args.size(); ++i) {
+        const auto& p = f.params[i];
+        const auto& a = *call.args[i];
+
+        if (p.type.is_ref) {
+            LValue target = eval_lvalue(caller_env, a, functions);
+            callee_env.define_ref(p.name, target, p.type);
+        } else {
+            Value v = eval_expr(caller_env, a, functions);
+            callee_env.define_value(p.name, v, p.type);
+        }
+    }
+
+    try {
+        exec_stmt(callee_env, *f.body, functions);
+    } catch (const ReturnSignal& rs) {
+        return rs.value;
+    }
+
+    return default_value_for(f.return_type);
 }
 
 inline void exec_stmt(Env& env, const ast::Stmt& s, FunctionTable& functions) {
@@ -84,7 +159,7 @@ inline void exec_stmt(Env& env, const ast::Stmt& s, FunctionTable& functions) {
             LValue target = eval_lvalue(env, *v->init, functions);
             env.define_ref(v->name, target, t);
         } else {
-            Value init = v->init ? eval_expr(env, *v->init, functions) : Value{0};
+            Value init = v->init ? eval_expr(env, *v->init, functions) : default_value_for(t);
             env.define_value(v->name, init, t);
         }
         return;
@@ -149,6 +224,16 @@ inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions) {
     if (dynamic_cast<const MemberAccessExpr*>(&e)) {
         LValue lv = eval_lvalue(env, e, functions);
         return env.read_lvalue(lv);
+    }
+
+    if (auto* call = dynamic_cast<const CallExpr*>(&e)) {
+        std::vector<ast::Type> arg_types;
+        arg_types.reserve(call->args.size());
+        for (auto& a : call->args)
+            arg_types.push_back(arg_type_for_call(env, *a, functions));
+
+        ast::FunctionDef& f = functions.resolve(call->callee, arg_types);
+        return call_function(env, f, *call, functions);
     }
 
     if (auto* u = dynamic_cast<const UnaryExpr*>(&e)) {
