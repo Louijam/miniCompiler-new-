@@ -9,107 +9,70 @@
 
 namespace interp {
 
-struct Binding {
-    LValue target;
-};
-
+struct Binding { LValue target; };
 using Slot = std::variant<Value, Binding>;
 
 struct Env {
     Env* parent = nullptr;
     std::unordered_map<std::string, Slot> slots;
 
-    explicit Env(Env* p = nullptr) : parent(p) {}
+    explicit Env(Env* p=nullptr):parent(p){}
 
-    bool contains_local(const std::string& name) const {
-        return slots.find(name) != slots.end();
-    }
+    bool contains_local(const std::string& n) const { return slots.count(n); }
 
-    Slot* find_slot(const std::string& name) {
-        auto it = slots.find(name);
-        if (it != slots.end()) return &it->second;
-        if (parent) return parent->find_slot(name);
+    Slot* find_slot(const std::string& n){
+        if (slots.count(n)) return &slots[n];
+        if (parent) return parent->find_slot(n);
         return nullptr;
     }
 
-    // NEU: finde den Env, in dem name definiert ist (oder nullptr)
-    Env* find_def_env(const std::string& name) {
-        auto it = slots.find(name);
-        if (it != slots.end()) return this;
-        if (parent) return parent->find_def_env(name);
+    Env* find_def_env(const std::string& n){
+        if (slots.count(n)) return this;
+        if (parent) return parent->find_def_env(n);
         return nullptr;
     }
 
-    // NEU: resolve name zu einem "echten" LValue (Value-Slot oder Binding-Ziel)
-    LValue resolve_lvalue(const std::string& name) {
-        Env* def = find_def_env(name);
-        if (!def) throw std::runtime_error("undefined variable: " + name);
-
-        Slot& s = def->slots.at(name);
-
-        if (auto* pv = std::get_if<Value>(&s)) {
-            (void)pv;
-            return LValue::var(*def, name);
-        }
-        auto* pb = std::get_if<Binding>(&s);
-        return pb->target; // bind through references
+    LValue resolve_lvalue(const std::string& n){
+        Env* e = find_def_env(n);
+        if (!e) throw std::runtime_error("undefined variable: " + n);
+        Slot& s = e->slots[n];
+        if (auto* v = std::get_if<Value>(&s)) return LValue::var(*e,n);
+        return std::get<Binding>(s).target;
     }
 
-    // define value variable
-    void define_value(const std::string& name, Value v) {
-        if (contains_local(name)) throw std::runtime_error("duplicate definition: " + name);
-        slots.emplace(name, Slot{std::move(v)});
+    void define_value(const std::string& n, Value v){
+        if (contains_local(n)) throw std::runtime_error("duplicate definition: "+n);
+        slots.emplace(n, Slot{v});
     }
 
-    // define reference variable
-    void define_ref(const std::string& name, LValue target) {
-        if (contains_local(name)) throw std::runtime_error("duplicate definition: " + name);
-        slots.emplace(name, Slot{Binding{std::move(target)}});
+    void define_ref(const std::string& n, LValue lv){
+        if (contains_local(n)) throw std::runtime_error("duplicate definition: "+n);
+        slots.emplace(n, Slot{Binding{lv}});
     }
 
-    Value read_value(const std::string& name) {
-        Slot* s = find_slot(name);
-        if (!s) throw std::runtime_error("undefined variable: " + name);
-
-        if (auto* pv = std::get_if<Value>(s)) return *pv; // copy
-        auto* pb = std::get_if<Binding>(s);
-        return read_lvalue(pb->target);
+    Value read_value(const std::string& n){
+        Slot* s = find_slot(n);
+        if (!s) throw std::runtime_error("undefined variable: "+n);
+        if (auto* v = std::get_if<Value>(s)) return *v;
+        return read_lvalue(std::get<Binding>(*s).target);
     }
 
-    void assign_value(const std::string& name, Value v) {
-        Slot* s = find_slot(name);
-        if (!s) throw std::runtime_error("undefined variable: " + name);
-
-        if (auto* pv = std::get_if<Value>(s)) {
-            *pv = std::move(v);
-            return;
-        }
-        auto* pb = std::get_if<Binding>(s);
-        write_lvalue(pb->target, std::move(v));
+    void assign_value(const std::string& n, Value v){
+        Slot* s = find_slot(n);
+        if (!s) throw std::runtime_error("undefined variable: "+n);
+        if (auto* pv = std::get_if<Value>(s)) { *pv = v; return; }
+        write_lvalue(std::get<Binding>(*s).target, v);
     }
 
-    // write directly to an lvalue
-    void write_lvalue(const LValue& lv, Value v) {
-        if (lv.kind != LValue::Kind::Var) throw std::runtime_error("unsupported lvalue kind");
-        if (!lv.env) throw std::runtime_error("null lvalue env");
-
+    void write_lvalue(const LValue& lv, Value v){
         Slot* s = lv.env->find_slot(lv.name);
-        if (!s) throw std::runtime_error("dangling lvalue: " + lv.name);
-
         auto* pv = std::get_if<Value>(s);
-        if (!pv) throw std::runtime_error("cannot write to non-value slot: " + lv.name);
-        *pv = std::move(v);
+        *pv = v;
     }
 
-    Value read_lvalue(const LValue& lv) {
-        if (lv.kind != LValue::Kind::Var) throw std::runtime_error("unsupported lvalue kind");
-        if (!lv.env) throw std::runtime_error("null lvalue env");
-
+    Value read_lvalue(const LValue& lv){
         Slot* s = lv.env->find_slot(lv.name);
-        if (!s) throw std::runtime_error("dangling lvalue: " + lv.name);
-
         auto* pv = std::get_if<Value>(s);
-        if (!pv) throw std::runtime_error("cannot read from non-value slot: " + lv.name);
         return *pv;
     }
 };
