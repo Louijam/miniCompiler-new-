@@ -18,10 +18,18 @@ struct MethodInfo {
     bool is_virtual = false;
 };
 
+struct CtorInfo {
+    const ast::ConstructorDef* def = nullptr; // points into Program (stable after build)
+    std::string owner_class;
+};
+
 struct ClassInfo {
     std::string name;
     std::string base;
+
     std::unordered_map<std::string, ast::Type> merged_fields; // derived wins
+    std::vector<CtorInfo> ctors;
+
     std::unordered_map<std::string, std::vector<MethodInfo>> methods;
     std::unordered_map<std::string, std::string> vtable_owner;
     std::unordered_map<std::string, bool> vtable_virtual;
@@ -33,6 +41,17 @@ struct ClassRuntime {
 
     static std::string sig_key(const std::string& mname, const std::vector<ast::Param>& params) {
         std::string k = mname;
+        k += "(";
+        for (size_t i = 0; i < params.size(); ++i) {
+            if (i) k += ",";
+            k += ast::to_string(params[i].type);
+        }
+        k += ")";
+        return k;
+    }
+
+    static std::string ctor_key(const std::string& cname, const std::vector<ast::Param>& params) {
+        std::string k = cname;
         k += "(";
         for (size_t i = 0; i < params.size(); ++i) {
             if (i) k += ",";
@@ -59,6 +78,7 @@ struct ClassRuntime {
             classes.emplace(ci.name, std::move(ci));
         }
 
+        // merged fields (derived wins)
         for (const auto& c : p.classes) {
             auto& ci = classes.at(c.name);
 
@@ -76,8 +96,18 @@ struct ClassRuntime {
             ci.merged_fields = std::move(merged);
         }
 
+        // ctors + methods
         for (const auto& c : p.classes) {
             auto& ci = classes.at(c.name);
+
+            ci.ctors.clear();
+            for (const auto& ctor : c.ctors) {
+                CtorInfo ci2;
+                ci2.def = &ctor;
+                ci2.owner_class = c.name;
+                ci.ctors.push_back(ci2);
+            }
+
             for (const auto& m : c.methods) {
                 MethodInfo mi;
                 mi.def = &m;
@@ -87,6 +117,7 @@ struct ClassRuntime {
             }
         }
 
+        // vtable_owner / vtable_virtual
         for (const auto& c : p.classes) {
             auto& ci = classes.at(c.name);
 
@@ -131,6 +162,54 @@ struct ClassRuntime {
 
     static ast::Type base_type(ast::Type t) { t.is_ref = false; return t; }
 
+    // --- ctor overload resolution (only inside the same class) ---
+    const ast::ConstructorDef& resolve_ctor(const std::string& class_name,
+                                            const std::vector<ast::Type>& arg_types,
+                                            const std::vector<bool>& arg_is_lvalue) const {
+        const auto& ci = get(class_name);
+
+        // If no ctors exist (should not happen after sema), synth default empty.
+        if (ci.ctors.empty()) {
+            static ast::ConstructorDef synth;
+            return synth;
+        }
+
+        const ast::ConstructorDef* best = nullptr;
+        int best_score = -1;
+
+        for (const auto& cti : ci.ctors) {
+            const auto& ctor = *cti.def;
+            if (ctor.params.size() != arg_types.size()) continue;
+
+            bool ok = true;
+            int score = 0;
+
+            for (size_t i = 0; i < arg_types.size(); ++i) {
+                ast::Type at = base_type(arg_types[i]);
+                ast::Type pt = ctor.params[i].type;
+
+                if (base_type(pt) != at) { ok = false; break; }
+                if (pt.is_ref) {
+                    if (!arg_is_lvalue[i]) { ok = false; break; }
+                    score += 1;
+                }
+            }
+
+            if (!ok) continue;
+
+            if (score > best_score) {
+                best_score = score;
+                best = &ctor;
+            } else if (score == best_score) {
+                throw std::runtime_error("runtime error: ambiguous constructor call: " + class_name);
+            }
+        }
+
+        if (!best) throw std::runtime_error("runtime error: no matching constructor: " + class_name);
+        return *best;
+    }
+
+    // --- method resolution (unchanged) ---
     const ast::MethodDef& pick_overload_in_class(const std::string& cls,
                                                  const std::string& method,
                                                  const std::vector<ast::Type>& arg_types,

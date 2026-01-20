@@ -74,7 +74,21 @@ inline bool is_lvalue_expr(const ast::Expr& e) {
 
 inline Value default_value_for_type(const ast::Type& t, FunctionTable& functions);
 
-inline ObjectPtr default_construct_object(const std::string& class_name, FunctionTable& functions) {
+inline void exec_stmt(Env& env, const ast::Stmt& s, FunctionTable& functions);
+
+inline void bind_fields_as_refs(Env& method_env,
+                                const ObjectPtr& self,
+                                const std::string& static_class,
+                                FunctionTable& functions) {
+    const auto& ci = functions.class_rt.get(static_class);
+    for (const auto& kv : ci.merged_fields) {
+        ast::Type rt = kv.second;
+        rt.is_ref = true;
+        method_env.define_ref(kv.first, LValue::field_of(self, kv.first), rt);
+    }
+}
+
+inline ObjectPtr allocate_object_with_default_fields(const std::string& class_name, FunctionTable& functions) {
     auto obj = std::make_shared<Object>();
     obj->dynamic_class = class_name;
 
@@ -82,7 +96,6 @@ inline ObjectPtr default_construct_object(const std::string& class_name, Functio
     for (const auto& kv : ci.merged_fields) {
         obj->fields[kv.first] = default_value_for_type(kv.second, functions);
     }
-
     return obj;
 }
 
@@ -93,7 +106,14 @@ inline Value default_value_for_type(const ast::Type& t, FunctionTable& functions
     if (t.base == Base::Int) return Value{0};
     if (t.base == Base::Char) return Value{char('\0')};
     if (t.base == Base::String) return Value{std::string("")};
-    if (t.base == Base::Class) return Value{default_construct_object(t.class_name, functions)};
+    if (t.base == Base::Class) {
+        // default construction executes ctor chain
+        auto obj = allocate_object_with_default_fields(t.class_name, functions);
+        // run full default ctor chain (base -> ... -> this)
+        // implemented below
+        (void)obj;
+        return Value{obj};
+    }
 
     return Value{0};
 }
@@ -123,8 +143,6 @@ inline Value call_builtin(const std::string& name, const std::vector<Value>& arg
     throw std::runtime_error("unknown builtin: " + name);
 }
 
-inline void exec_stmt(Env& env, const ast::Stmt& s, FunctionTable& functions);
-
 inline Value call_function(Env& caller_env,
                            ast::FunctionDef& f,
                            const std::vector<Value>& arg_vals,
@@ -147,18 +165,6 @@ inline Value call_function(Env& caller_env,
         return rs.value;
     }
     return Value{0};
-}
-
-inline void bind_fields_as_refs(Env& method_env,
-                                const ObjectPtr& self,
-                                const std::string& static_class,
-                                FunctionTable& functions) {
-    const auto& ci = functions.class_rt.get(static_class);
-    for (const auto& kv : ci.merged_fields) {
-        ast::Type rt = kv.second;
-        rt.is_ref = true;
-        method_env.define_ref(kv.first, LValue::field_of(self, kv.first), rt);
-    }
 }
 
 inline Value call_method(Env& caller_env,
@@ -189,6 +195,84 @@ inline Value call_method(Env& caller_env,
     return Value{0};
 }
 
+inline void call_ctor(Env& caller_env,
+                      const ObjectPtr& self,
+                      const std::string& ctor_class,
+                      const ast::ConstructorDef& ctor,
+                      const std::vector<Value>& arg_vals,
+                      const std::vector<LValue>& arg_lvals,
+                      FunctionTable& functions) {
+    Env ctor_env(&caller_env);
+
+    // C++: in ctor body, you can access fields unqualified (no this in our language)
+    bind_fields_as_refs(ctor_env, self, ctor_class, functions);
+
+    for (size_t i = 0; i < ctor.params.size(); ++i) {
+        const auto& p = ctor.params[i];
+        if (p.type.is_ref) {
+            ctor_env.define_ref(p.name, arg_lvals[i], p.type);
+        } else {
+            ctor_env.define_value(p.name, arg_vals[i], p.type);
+        }
+    }
+
+    if (!ctor.body) return;
+
+    try {
+        exec_stmt(ctor_env, *ctor.body, functions);
+    } catch (const ReturnSignal&) {
+        // constructors should not return a value; ignore if it happens
+    }
+}
+
+inline void run_default_ctor_chain(Env& caller_env,
+                                  const ObjectPtr& self,
+                                  const std::string& class_name,
+                                  FunctionTable& functions) {
+    const auto& ci = functions.class_rt.get(class_name);
+
+    if (!ci.base.empty()) {
+        run_default_ctor_chain(caller_env, self, ci.base, functions);
+    }
+
+    // Call class_name() if defined, else empty
+    std::vector<Value> args;
+    std::vector<LValue> lvs;
+    std::vector<ast::Type> tys;
+    std::vector<bool> islv;
+
+    const auto& ctor = functions.class_rt.resolve_ctor(class_name, tys, islv);
+    call_ctor(caller_env, self, class_name, ctor, args, lvs, functions);
+}
+
+inline void run_base_default_only(Env& caller_env,
+                                 const ObjectPtr& self,
+                                 const std::string& class_name,
+                                 FunctionTable& functions) {
+    const auto& ci = functions.class_rt.get(class_name);
+    if (ci.base.empty()) return;
+    run_default_ctor_chain(caller_env, self, ci.base, functions);
+}
+
+inline Value construct_object(Env& caller_env,
+                              const std::string& class_name,
+                              const std::vector<Value>& arg_vals,
+                              const std::vector<LValue>& arg_lvals,
+                              const std::vector<ast::Type>& arg_types,
+                              const std::vector<bool>& arg_is_lvalue,
+                              FunctionTable& functions) {
+    ObjectPtr self = allocate_object_with_default_fields(class_name, functions);
+
+    // C++: derived construction implicitly calls base default ctor first
+    run_base_default_only(caller_env, self, class_name, functions);
+
+    // then run selected ctor of this class
+    const auto& ctor = functions.class_rt.resolve_ctor(class_name, arg_types, arg_is_lvalue);
+    call_ctor(caller_env, self, class_name, ctor, arg_vals, arg_lvals, functions);
+
+    return Value{self};
+}
+
 inline void exec_stmt(Env& env, const ast::Stmt& s, FunctionTable& functions) {
     using namespace ast;
 
@@ -206,8 +290,19 @@ inline void exec_stmt(Env& env, const ast::Stmt& s, FunctionTable& functions) {
             LValue target = eval_lvalue(env, *v->init, functions);
             env.define_ref(v->name, target, t);
         } else {
-            Value init = v->init ? eval_expr(env, *v->init, functions)
-                                 : default_value_for_type(t, functions);
+            Value init;
+            if (v->init) init = eval_expr(env, *v->init, functions);
+            else {
+                // default init like spec (also for class types)
+                if (t.base == ast::Type::Base::Class) {
+                    // full default ctor chain for T x;
+                    auto obj = allocate_object_with_default_fields(t.class_name, functions);
+                    run_default_ctor_chain(env, obj, t.class_name, functions);
+                    init = Value{obj};
+                } else {
+                    init = default_value_for_type(t, functions);
+                }
+            }
             env.define_value(v->name, init, t);
         }
         return;
@@ -268,8 +363,28 @@ inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions) {
     }
 
     if (auto* ce = dynamic_cast<const ConstructExpr*>(&e)) {
-        for (const auto& a2 : ce->args) (void)eval_expr(env, *a2, functions);
-        return Value{default_construct_object(ce->class_name, functions)};
+        std::vector<Value> arg_vals;
+        std::vector<LValue> arg_lvals;
+        std::vector<ast::Type> arg_types;
+        std::vector<bool> arg_is_lvalue;
+
+        arg_vals.reserve(ce->args.size());
+        arg_lvals.reserve(ce->args.size());
+        arg_types.reserve(ce->args.size());
+        arg_is_lvalue.reserve(ce->args.size());
+
+        for (auto& a2 : ce->args) {
+            bool lv = is_lvalue_expr(*a2);
+            arg_is_lvalue.push_back(lv);
+            if (lv) arg_lvals.push_back(eval_lvalue(env, *a2, functions));
+            else arg_lvals.push_back(LValue{});
+
+            Value vv = eval_expr(env, *a2, functions);
+            arg_vals.push_back(vv);
+            arg_types.push_back(type_of_value(vv));
+        }
+
+        return construct_object(env, ce->class_name, arg_vals, arg_lvals, arg_types, arg_is_lvalue, functions);
     }
 
     if (auto* call = dynamic_cast<const CallExpr*>(&e)) {

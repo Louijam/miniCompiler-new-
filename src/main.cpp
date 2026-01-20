@@ -45,7 +45,6 @@ static ast::StmtPtr ret_int(int v) {
 static int run_selftest_dispatch() {
     using namespace ast;
 
-    // class B { public: virtual int m(){ print_int(1); return 0; } }
     ClassDef B;
     B.name = "B";
 
@@ -61,13 +60,12 @@ static int run_selftest_dispatch() {
     }
     B.methods.push_back(std::move(Bm));
 
-    // class D : public B { public: int m(){ print_int(2); return 0; } }
     ClassDef D;
     D.name = "D";
     D.base_name = "B";
 
     MethodDef Dm;
-    Dm.is_virtual = false; // override should still be treated virtual at runtime (via vtable)
+    Dm.is_virtual = false;
     Dm.name = "m";
     Dm.return_type = Type::Int(false);
     {
@@ -78,32 +76,28 @@ static int run_selftest_dispatch() {
     }
     D.methods.push_back(std::move(Dm));
 
-    // program
     Program p;
     p.classes.push_back(std::move(B));
     p.classes.push_back(std::move(D));
 
-    // build runtime tables
     interp::FunctionTable ft;
     ft.add_program(p);
 
-    // simulate:
-    // D d; B& b = d; b.m();
     interp::Env env(nullptr);
 
-    // D d;
     {
         auto tD = Type::Class("D", false);
-        env.define_value("d", interp::default_value_for_type(tD, ft), tD);
+        auto ce = std::make_unique<ConstructExpr>();
+        ce->class_name = "D";
+        interp::Value dv = interp::eval_expr(env, *ce, ft);
+        env.define_value("d", dv, tD);
     }
 
-    // B& b = d;
     {
         auto tBRef = Type::Class("B", true);
         env.define_ref("b", env.resolve_lvalue("d"), tBRef);
     }
 
-    // b.m();
     {
         auto mc = std::make_unique<MethodCallExpr>();
         mc->object = std::make_unique<VarExpr>("b");
@@ -115,13 +109,53 @@ static int run_selftest_dispatch() {
     return 0;
 }
 
+static int run_selftest_ctorchain() {
+    using namespace ast;
+
+    ClassDef B;
+    B.name = "B";
+    {
+        ConstructorDef bc;
+        std::vector<StmtPtr> ss;
+        ss.push_back(expr_stmt(call_print_int(10)));
+        bc.body = block(std::move(ss));
+        B.ctors.push_back(std::move(bc));
+    }
+
+    ClassDef D;
+    D.name = "D";
+    D.base_name = "B";
+    {
+        ConstructorDef dc;
+        std::vector<StmtPtr> ss;
+        ss.push_back(expr_stmt(call_print_int(20)));
+        dc.body = block(std::move(ss));
+        D.ctors.push_back(std::move(dc));
+    }
+
+    Program p;
+    p.classes.push_back(std::move(B));
+    p.classes.push_back(std::move(D));
+
+    interp::FunctionTable ft;
+    ft.add_program(p);
+
+    interp::Env env(nullptr);
+
+    auto ce = std::make_unique<ConstructExpr>();
+    ce->class_name = "D";
+    (void)interp::eval_expr(env, *ce, ft);
+
+    std::cout << "CTORCHAIN SELFTEST OK\n";
+    return 0;
+}
+
 int main(int argc, char** argv) {
     try {
         if (argc > 1) {
             std::string arg = argv[1];
-            if (arg == "--selftest-dispatch") {
-                return run_selftest_dispatch();
-            }
+            if (arg == "--selftest-dispatch") return run_selftest_dispatch();
+            if (arg == "--selftest-ctorchain") return run_selftest_ctorchain();
         }
         return repl::run_repl();
     } catch (const std::exception& ex) {
