@@ -1,11 +1,13 @@
 #pragma once
+
 #include <string>
 #include <memory>
+
 #include "value.hpp"
 
 namespace interp {
 
-struct Env; // forward
+struct Env;
 
 struct LValue {
     enum class Kind { Var, Field };
@@ -28,7 +30,7 @@ struct LValue {
         return lv;
     }
 
-    static LValue field_ref(ObjectPtr o, std::string f) {
+    static LValue field_of(ObjectPtr o, std::string f) {
         LValue lv;
         lv.kind = Kind::Field;
         lv.obj = std::move(o);
