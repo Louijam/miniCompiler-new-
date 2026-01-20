@@ -25,7 +25,7 @@ struct ClassSymbol {
     std::string base_name; // empty if none
 
     std::unordered_map<std::string, ast::Type> fields; // own fields
-    std::vector<CtorSymbol> ctors;                     // own ctors (NEW)
+    std::vector<CtorSymbol> ctors;                     // own ctors
     std::unordered_map<std::string, std::vector<MethodSymbol>> methods; // own methods
 };
 
@@ -87,7 +87,7 @@ struct ClassTable {
             cs.fields.emplace(f.name, f.type);
         }
 
-        // ctors (NEW)
+        // constructors
         cs.ctors.clear();
         for (const auto& ctor : c.ctors) {
             CtorSymbol sym;
@@ -102,12 +102,13 @@ struct ClassTable {
             cs.ctors.push_back(std::move(sym));
         }
 
-        // synthesize default ctor if none exists (spec rule)
+        // synthesize default ctor if none
         if (cs.ctors.empty()) {
             CtorSymbol def;
             cs.ctors.push_back(std::move(def));
         }
 
+        // methods
         for (const auto& m : c.methods) {
             MethodSymbol ms;
             ms.name = m.name;
@@ -153,10 +154,11 @@ struct ClassTable {
 
         for (const auto& [name, _] : classes) dfs(dfs, name);
 
-        // base default-ctor must exist (directly or synthesized)
+        // base default ctor must exist
         for (const auto& [name, cs] : classes) {
             if (cs.base_name.empty()) continue;
             const auto& base = get_class(cs.base_name);
+
             bool has_default = false;
             for (const auto& ctor : base.ctors) {
                 if (ctor.param_types.empty()) { has_default = true; break; }
@@ -182,17 +184,24 @@ struct ClassTable {
         return nullptr;
     }
 
-    void check_overrides_and_virtuals() const {
-        for (const auto& [name, cs] : classes) {
+    // IMPORTANT: must be non-const because we propagate virtual-ness to overrides
+    void check_overrides_and_virtuals() {
+        for (auto& [name, cs] : classes) {
             if (cs.base_name.empty()) continue;
 
-            for (const auto& [mname, overloads] : cs.methods) {
-                for (const auto& dm : overloads) {
+            for (auto& [mname, overloads] : cs.methods) {
+                for (auto& dm : overloads) {
                     const MethodSymbol* bm = find_exact_in_chain(cs.base_name, dm);
                     if (!bm) continue;
 
+                    // return type must match
                     if (bm->return_type != dm.return_type) {
                         throw std::runtime_error("semantic error: override return type mismatch in class " + name + " for method " + mname);
+                    }
+
+                    // C++ rule: override of a virtual method is virtual even without re-declaring virtual
+                    if (bm->is_virtual) {
+                        dm.is_virtual = true;
                     }
                 }
             }
@@ -280,7 +289,6 @@ struct ClassTable {
         return *best;
     }
 
-    // NEW: resolve constructor overload by exact signature (incl. & + lvalue rule)
     const CtorSymbol& resolve_ctor_call(const std::string& class_name,
                                        const std::vector<ast::Type>& arg_base_types,
                                        const std::vector<bool>& arg_is_lvalue) const {

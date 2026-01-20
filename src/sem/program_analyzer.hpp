@@ -13,21 +13,6 @@ namespace sem {
 struct ProgramAnalyzer {
     Analyzer analyzer;
 
-    static void add_builtin(Scope& global, const std::string& name, const ast::Type& param) {
-        FuncSymbol sym;
-        sym.name = name;
-        sym.return_type = ast::Type::Void();
-        sym.param_types = { param };
-        global.define_func(sym);
-    }
-
-    static void add_builtins(Scope& global) {
-        add_builtin(global, "print_bool",   ast::Type::Bool(false));
-        add_builtin(global, "print_int",    ast::Type::Int(false));
-        add_builtin(global, "print_char",   ast::Type::Char(false));
-        add_builtin(global, "print_string", ast::Type::String(false));
-    }
-
     static void check_main_signature(const Scope& global) {
         bool ok = false;
 
@@ -49,24 +34,15 @@ struct ProgramAnalyzer {
         Scope global;
         ClassTable ct;
 
-        // PASS 0: class names
         for (const auto& c : p.classes) ct.add_class_name(c.name);
-
-        // PASS 1: class members (fields, ctors, methods)
         for (const auto& c : p.classes) ct.fill_class_members(c);
-
-        // PASS 2: inheritance checks (+ base default-ctor availability)
         ct.check_inheritance();
 
-        // PASS 3: overrides
+        // now propagates virtual-ness to overrides
         ct.check_overrides_and_virtuals();
 
         analyzer.set_class_table(&ct);
 
-        // builtins always available
-        add_builtins(global);
-
-        // PASS 1: function signatures
         for (const auto& f : p.functions) {
             FuncSymbol sym;
             sym.name = f.name;
@@ -78,10 +54,8 @@ struct ProgramAnalyzer {
 
         check_main_signature(global);
 
-        // PASS 2: function bodies
         for (const auto& f : p.functions) analyzer.check_function(global, f);
 
-        // PASS 4: method bodies
         for (const auto& c : p.classes) {
             for (const auto& m : c.methods) analyzer.check_method(global, ct, c.name, m);
         }

@@ -6,65 +6,61 @@
 
 #include "repl/repl.hpp"
 
-#include "sem/program_analyzer.hpp"
-#include "ast/program.hpp"
-#include "ast/expr.hpp"
-#include "ast/stmt.hpp"
+#include "sem/class_table.hpp"
+#include "ast/class.hpp"
 #include "ast/type.hpp"
-#include "ast/function.hpp"
+#include "ast/stmt.hpp"
 
-static std::unique_ptr<ast::CallExpr> make_call(const std::string& name, std::vector<ast::ExprPtr> args) {
-    auto c = std::make_unique<ast::CallExpr>();
-    c->callee = name;
-    c->args = std::move(args);
-    return c;
-}
-
-static std::unique_ptr<ast::ExprStmt> make_exprstmt(ast::ExprPtr e) {
-    auto s = std::make_unique<ast::ExprStmt>();
-    s->expr = std::move(e);
-    return s;
-}
-
-static std::unique_ptr<ast::ReturnStmt> make_return(ast::ExprPtr e) {
-    auto r = std::make_unique<ast::ReturnStmt>();
-    r->value = std::move(e);
-    return r;
-}
-
-static std::unique_ptr<ast::BlockStmt> make_block(std::vector<std::unique_ptr<ast::Stmt>> stmts) {
+static std::unique_ptr<ast::BlockStmt> empty_block() {
     auto b = std::make_unique<ast::BlockStmt>();
-    b->statements = std::move(stmts);
     return b;
 }
 
-static int run_sema_selftest() {
+static int run_virtual_selftest() {
     using namespace ast;
+    using namespace sem;
 
-    // Build minimal program:
-    // int main() { print_int(1); return 0; }
-    Program p;
+    ClassDef B;
+    B.name = "B";
+    B.base_name = "";
 
-    FunctionDef f;
-    f.name = "main";
-    f.return_type = Type::Int(false);
+    MethodDef bm;
+    bm.is_virtual = true;
+    bm.name = "m";
+    bm.return_type = Type::Int(false);
+    bm.body = empty_block();
+    B.methods.push_back(std::move(bm));
 
-    std::vector<std::unique_ptr<Stmt>> body;
+    ClassDef D;
+    D.name = "D";
+    D.base_name = "B";
 
-    {
-        std::vector<ExprPtr> args;
-        args.push_back(std::make_unique<IntLiteral>(1));
-        body.push_back(make_exprstmt(make_call("print_int", std::move(args))));
+    MethodDef dm;
+    dm.is_virtual = false; // IMPORTANT: not declared virtual
+    dm.name = "m";
+    dm.return_type = Type::Int(false);
+    dm.body = empty_block();
+    D.methods.push_back(std::move(dm));
+
+    ClassTable ct;
+    ct.add_class_name("B");
+    ct.add_class_name("D");
+
+    ct.fill_class_members(B);
+    ct.fill_class_members(D);
+
+    ct.check_inheritance();
+    ct.check_overrides_and_virtuals();
+
+    const auto& csD = ct.get_class("D");
+    auto it = csD.methods.find("m");
+    if (it == csD.methods.end() || it->second.empty()) throw std::runtime_error("selftest: missing D::m");
+
+    if (!it->second[0].is_virtual) {
+        throw std::runtime_error("selftest: expected D::m to be virtual (inherited from B::m)");
     }
-    body.push_back(make_return(std::make_unique<IntLiteral>(0)));
 
-    f.body = make_block(std::move(body));
-    p.functions.push_back(std::move(f));
-
-    sem::ProgramAnalyzer pa;
-    pa.analyze(p);
-
-    std::cout << "SEMA SELFTEST OK\n";
+    std::cout << "VIRTUAL SELFTEST OK\n";
     return 0;
 }
 
@@ -72,9 +68,7 @@ int main(int argc, char** argv) {
     try {
         if (argc > 1) {
             std::string arg = argv[1];
-            if (arg == "--selftest-sema") {
-                return run_sema_selftest();
-            }
+            if (arg == "--selftest-virtual") return run_virtual_selftest();
         }
         return repl::run_repl();
     } catch (const std::exception& ex) {
