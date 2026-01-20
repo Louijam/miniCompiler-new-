@@ -1,9 +1,8 @@
 #pragma once
 #include <stdexcept>
 #include <vector>
+#include <iostream>
 #include <string>
-#include <utility>
-#include <memory>
 
 #include "env.hpp"
 #include "functions.hpp"
@@ -15,7 +14,9 @@
 
 namespace interp {
 
-struct ReturnSignal { Value value; };
+struct ReturnSignal {
+    Value value;
+};
 
 inline bool to_bool_like_cpp(const Value& v) {
     if (auto* pi = std::get_if<int>(&v)) return *pi != 0;
@@ -29,14 +30,17 @@ inline int expect_int(const Value& v, const char* ctx) {
     if (auto* pi = std::get_if<int>(&v)) return *pi;
     throw std::runtime_error(std::string("type error: expected int in ") + ctx);
 }
+
 inline bool expect_bool(const Value& v, const char* ctx) {
     if (auto* pb = std::get_if<bool>(&v)) return *pb;
     throw std::runtime_error(std::string("type error: expected bool in ") + ctx);
 }
+
 inline char expect_char(const Value& v, const char* ctx) {
     if (auto* pc = std::get_if<char>(&v)) return *pc;
     throw std::runtime_error(std::string("type error: expected char in ") + ctx);
 }
+
 inline const std::string& expect_string(const Value& v, const char* ctx) {
     if (auto* ps = std::get_if<std::string>(&v)) return *ps;
     throw std::runtime_error(std::string("type error: expected string in ") + ctx);
@@ -62,8 +66,6 @@ inline Value default_value_for(const ast::Type& t) {
         case ast::Type::Base::String: return Value{std::string("")};
         case ast::Type::Base::Void:   return Value{0};
         case ast::Type::Base::Class: {
-            // Minimal: Objekt mit dynamischem Typ = Klassenname.
-            // Felder/CTor-Logik kommt als nächster Schritt.
             auto o = std::make_shared<Object>();
             o->dynamic_class = t.class_name;
             return Value{o};
@@ -145,7 +147,8 @@ inline void exec_stmt(Env& env, const ast::Stmt& s, FunctionTable& functions) {
 
     if (auto* b = dynamic_cast<const BlockStmt*>(&s)) {
         Env local(&env);
-        for (auto& st : b->statements) exec_stmt(local, *st, functions);
+        for (auto& st : b->statements)
+            exec_stmt(local, *st, functions);
         return;
     }
 
@@ -153,7 +156,8 @@ inline void exec_stmt(Env& env, const ast::Stmt& s, FunctionTable& functions) {
         const ast::Type& t = v->decl_type;
 
         if (t.is_ref) {
-            if (!v->init) throw std::runtime_error("Referenzvariable muss initialisiert werden");
+            if (!v->init)
+                throw std::runtime_error("Referenzvariable muss initialisiert werden");
             LValue target = eval_lvalue(env, *v->init, functions);
             env.define_ref(v->name, target, t);
         } else {
@@ -170,8 +174,10 @@ inline void exec_stmt(Env& env, const ast::Stmt& s, FunctionTable& functions) {
 
     if (auto* i = dynamic_cast<const IfStmt*>(&s)) {
         bool cond = to_bool_like_cpp(eval_expr(env, *i->cond, functions));
-        if (cond) exec_stmt(env, *i->then_branch, functions);
-        else if (i->else_branch) exec_stmt(env, *i->else_branch, functions);
+        if (cond)
+            exec_stmt(env, *i->then_branch, functions);
+        else if (i->else_branch)
+            exec_stmt(env, *i->else_branch, functions);
         return;
     }
 
@@ -187,6 +193,14 @@ inline void exec_stmt(Env& env, const ast::Stmt& s, FunctionTable& functions) {
     }
 
     throw std::runtime_error("unknown statement");
+}
+
+inline void builtin_print(const std::string& name, const Value& v) {
+    if (name == "print_bool")   { std::cout << (std::get<bool>(v) ? "true" : "false") << "\n"; return; }
+    if (name == "print_int")    { std::cout << std::get<int>(v) << "\n"; return; }
+    if (name == "print_char")   { std::cout << std::get<char>(v) << "\n"; return; }
+    if (name == "print_string") { std::cout << std::get<std::string>(v) << "\n"; return; }
+    throw std::runtime_error("unknown builtin: " + name);
 }
 
 inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions) {
@@ -222,15 +236,26 @@ inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions) {
     }
 
     if (auto* call = dynamic_cast<const CallExpr*>(&e)) {
+        // builtins
+        if (call->callee == "print_bool" || call->callee == "print_int" ||
+            call->callee == "print_char" || call->callee == "print_string") {
+
+            if (call->args.size() != 1) throw std::runtime_error("arity mismatch calling " + call->callee);
+            Value v = eval_expr(env, *call->args[0], functions);
+            builtin_print(call->callee, v);
+            return Value{0};
+        }
+
         std::vector<ast::Type> arg_types;
         arg_types.reserve(call->args.size());
-        for (auto& a : call->args) arg_types.push_back(arg_type_for_call(env, *a, functions));
+        for (auto& a : call->args)
+            arg_types.push_back(arg_type_for_call(env, *a, functions));
+
         ast::FunctionDef& f = functions.resolve(call->callee, arg_types);
         return call_function(env, f, *call, functions);
     }
 
     if (auto* ce = dynamic_cast<const ConstructExpr*>(&e)) {
-        // Minimal: erzeugt ein Objekt mit dynamic_class, CTor-Handling kommt danach.
         auto o = std::make_shared<Object>();
         o->dynamic_class = ce->class_name;
         return Value{o};
@@ -271,43 +296,7 @@ inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions) {
                 if (r == 0) throw std::runtime_error("Modulo durch 0");
                 return expect_int(lv, "%") % r;
             }
-
-            case BinaryExpr::Op::Lt:
-            case BinaryExpr::Op::Le:
-            case BinaryExpr::Op::Gt:
-            case BinaryExpr::Op::Ge: {
-                if (std::holds_alternative<int>(lv)) {
-                    int a = expect_int(lv, "relop");
-                    int b = expect_int(rv, "relop");
-                    if (bin->op == BinaryExpr::Op::Lt) return a < b;
-                    if (bin->op == BinaryExpr::Op::Le) return a <= b;
-                    if (bin->op == BinaryExpr::Op::Gt) return a > b;
-                    return a >= b;
-                }
-                if (std::holds_alternative<char>(lv)) {
-                    char a = expect_char(lv, "relop");
-                    char b = expect_char(rv, "relop");
-                    if (bin->op == BinaryExpr::Op::Lt) return a < b;
-                    if (bin->op == BinaryExpr::Op::Le) return a <= b;
-                    if (bin->op == BinaryExpr::Op::Gt) return a > b;
-                    return a >= b;
-                }
-                throw std::runtime_error("type error: relational operators only for int/char");
-            }
-
-            case BinaryExpr::Op::Eq:
-            case BinaryExpr::Op::Ne: {
-                bool eq = false;
-                if (std::holds_alternative<int>(lv)) eq = expect_int(lv, "==") == expect_int(rv, "==");
-                else if (std::holds_alternative<char>(lv)) eq = expect_char(lv, "==") == expect_char(rv, "==");
-                else if (std::holds_alternative<bool>(lv)) eq = expect_bool(lv, "==") == expect_bool(rv, "==");
-                else if (std::holds_alternative<std::string>(lv)) eq = expect_string(lv, "==") == expect_string(rv, "==");
-                else throw std::runtime_error("type error: ==/!= not supported for this type");
-                return (bin->op == BinaryExpr::Op::Eq) ? eq : !eq;
-            }
-
-            case BinaryExpr::Op::AndAnd:
-            case BinaryExpr::Op::OrOr:
+            default:
                 break;
         }
     }

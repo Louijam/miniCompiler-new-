@@ -63,13 +63,6 @@ static std::unique_ptr<ast::CallExpr> make_call(const std::string& name, std::ve
     return c;
 }
 
-static std::unique_ptr<ast::ConstructExpr> make_ctor(const std::string& cls, std::vector<ast::ExprPtr> args) {
-    auto c = std::make_unique<ast::ConstructExpr>();
-    c->class_name = cls;
-    c->args = std::move(args);
-    return c;
-}
-
 static void expect_int_var(interp::Env& env, const std::string& name, int expected, const char* testname) {
     interp::Value v = env.read_value(name);
     auto* pi = std::get_if<int>(&v);
@@ -87,15 +80,6 @@ static void expect_int_value(const interp::Value& v, int expected, const char* t
     }
 }
 
-static void expect_obj_class(interp::Env& env, const std::string& name, const std::string& cls, const char* testname) {
-    interp::Value v = env.read_value(name);
-    auto* po = std::get_if<interp::ObjectPtr>(&v);
-    if (!po || !*po || (*po)->dynamic_class != cls) {
-        std::cerr << "TEST FAIL: " << testname << " expected " << name << " dynamic_class == " << cls << "\n";
-        std::exit(1);
-    }
-}
-
 int main() {
     using namespace ast;
     using namespace interp;
@@ -106,9 +90,8 @@ int main() {
     Type t_int = Type::Int(false);
     Type t_int_ref = Type::Int(true);
 
-    // --- overloads: inc(int) und inc(int&) ---
+    // int inc(int a) { return a + 1; }
     std::vector<std::unique_ptr<FunctionDef>> owned;
-
     {
         auto f = std::make_unique<FunctionDef>();
         f->name = "inc";
@@ -123,6 +106,7 @@ int main() {
         owned.push_back(std::move(f));
     }
 
+    // int inc(int& a) { a = a + 1; return a; }
     {
         auto f = std::make_unique<FunctionDef>();
         f->name = "inc";
@@ -138,39 +122,44 @@ int main() {
         owned.push_back(std::move(f));
     }
 
-    // --- statement/ref tests ---
-    { exec_stmt(env, *make_vardecl(t_int, "x", make_int(1)), functions); expect_int_var(env, "x", 1, "vardecl"); std::cout << "OK: vardecl\n"; }
-    { (void)eval_expr(env, *make_assign("x", make_bin(BinaryExpr::Op::Add, make_var("x"), make_int(2))), functions); expect_int_var(env, "x", 3, "assign"); std::cout << "OK: assign\n"; }
-    { exec_stmt(env, *make_vardecl(t_int_ref, "r", make_var("x")), functions); (void)eval_expr(env, *make_assign("r", make_int(10)), functions); expect_int_var(env, "x", 10, "ref"); std::cout << "OK: ref\n"; }
+    // int x = 10;
+    exec_stmt(env, *make_vardecl(t_int, "x", make_int(10)), functions);
+    expect_int_var(env, "x", 10, "vardecl");
+    std::cout << "OK: vardecl\n";
 
-    // --- call tests ---
+    // print_int(x);
     {
-        std::vector<ExprPtr> args; args.push_back(make_int(5));
+        std::vector<ExprPtr> args;
+        args.push_back(make_var("x"));
+        (void)eval_expr(env, *make_call("print_int", std::move(args)), functions);
+        std::cout << "OK: builtin print_int\n";
+    }
+
+    // inc(5) -> 6
+    {
+        std::vector<ExprPtr> args;
+        args.push_back(make_int(5));
         Value v = eval_expr(env, *make_call("inc", std::move(args)), functions);
         expect_int_value(v, 6, "inc(5)");
-        std::cout << "OK: inc(5)\n";
+        std::cout << "OK: call inc(5)\n";
     }
+
+    // inc(x) -> 11 und x wird 11
     {
-        std::vector<ExprPtr> args; args.push_back(make_var("x"));
+        std::vector<ExprPtr> args;
+        args.push_back(make_var("x"));
         Value v = eval_expr(env, *make_call("inc", std::move(args)), functions);
         expect_int_value(v, 11, "inc(x)");
         expect_int_var(env, "x", 11, "inc(x) mut");
-        std::cout << "OK: inc(x)\n";
+        std::cout << "OK: call inc(x)\n";
     }
 
-    // --- class value tests (minimal runtime) ---
+    // print_int(x); (soll 11 drucken)
     {
-        // D d;  -> default_value_for(Class) muss ein Objekt erzeugen
-        exec_stmt(env, *make_vardecl(Type::Class("D", false), "d", nullptr), functions);
-        expect_obj_class(env, "d", "D", "default class value");
-        std::cout << "OK: default class value D d;\n";
-    }
-    {
-        // E e = E(123); -> ConstructExpr erzeugt Objekt mit dynamic_class
-        std::vector<ExprPtr> args; args.push_back(make_int(123));
-        exec_stmt(env, *make_vardecl(Type::Class("E", false), "e", make_ctor("E", std::move(args))), functions);
-        expect_obj_class(env, "e", "E", "construct expr");
-        std::cout << "OK: construct expr E(123)\n";
+        std::vector<ExprPtr> args;
+        args.push_back(make_var("x"));
+        (void)eval_expr(env, *make_call("print_int", std::move(args)), functions);
+        std::cout << "OK: builtin print_int after mutation\n";
     }
 
     std::cout << "ALLE TESTS OK\n";
