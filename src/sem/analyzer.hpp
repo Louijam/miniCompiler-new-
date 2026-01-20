@@ -135,7 +135,6 @@ struct Analyzer {
             const auto& lhs = scope.lookup_var(a->name);
             ast::Type rhs_t = type_of_expr(scope, *a->value);
 
-            // allow Base = Derived (slicing) for classes
             if (base_type(lhs.type) != base_type(rhs_t)) {
                 if (!class_compatible_for_copy(lhs.type, rhs_t)) {
                     throw std::runtime_error("semantic error: assignment type mismatch: " +
@@ -143,6 +142,54 @@ struct Analyzer {
                 }
             }
             return rhs_t;
+        }
+
+        if (auto* fa = dynamic_cast<const FieldAssignExpr*>(&e)) {
+            if (!ct) throw std::runtime_error("semantic error: internal: class table not set");
+
+            // in unserem Subset: obj muss lvalue sein (kein Feldschreiben auf temporaeren Objekten)
+            if (!is_lvalue(*fa->object)) {
+                throw std::runtime_error("semantic error: field assignment requires lvalue object");
+            }
+
+            ast::Type obj_t = type_of_expr(scope, *fa->object);
+            std::string cn = class_name_of(obj_t);
+
+            if (!ct->has_field_in_chain(cn, fa->field)) {
+                throw std::runtime_error("semantic error: unknown field: " + cn + "." + fa->field);
+            }
+
+            ast::Type field_t = ct->field_type_in_chain(cn, fa->field);
+            ast::Type rhs_t = type_of_expr(scope, *fa->value);
+
+            if (base_type(field_t) != base_type(rhs_t)) {
+                if (!class_compatible_for_copy(field_t, rhs_t)) {
+                    throw std::runtime_error("semantic error: field assignment type mismatch: " +
+                        cn + "." + fa->field + " is " + type_name(field_t) + ", rhs is " + type_name(rhs_t));
+                }
+            }
+
+            return rhs_t; // assignment expression result type = rhs
+        }
+
+        if (auto* ce = dynamic_cast<const ConstructExpr*>(&e)) {
+            if (!ct) throw std::runtime_error("semantic error: internal: class table not set");
+            if (!ct->has_class(ce->class_name)) {
+                throw std::runtime_error("semantic error: unknown class: " + ce->class_name);
+            }
+
+            std::vector<ast::Type> arg_base;
+            std::vector<bool> arg_lv;
+            arg_base.reserve(ce->args.size());
+            arg_lv.reserve(ce->args.size());
+
+            for (const auto& a2 : ce->args) {
+                arg_base.push_back(base_type(type_of_expr(scope, *a2)));
+                arg_lv.push_back(is_lvalue(*a2));
+            }
+
+            (void)ct->resolve_ctor_call(ce->class_name, arg_base, arg_lv);
+            return Type::Class(ce->class_name);
         }
 
         if (auto* m = dynamic_cast<const MemberAccessExpr*>(&e)) {
@@ -338,7 +385,7 @@ struct Analyzer {
                       const ast::MethodDef& m) const {
         Scope member_scope(const_cast<Scope*>(&global));
         auto merged = ctab.merged_fields_derived_wins(class_name);
-        for (const auto& [fname, ftype] : merged) member_scope.define_var(fname, ftype);
+        for (const auto& kv : merged) member_scope.define_var(kv.first, kv.second);
 
         Scope method_scope(&member_scope);
 

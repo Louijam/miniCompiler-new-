@@ -52,10 +52,10 @@ struct ProgramAnalyzer {
         // PASS 0: class names
         for (const auto& c : p.classes) ct.add_class_name(c.name);
 
-        // PASS 1: class members
+        // PASS 1: class members (fields, ctors, methods)
         for (const auto& c : p.classes) ct.fill_class_members(c);
 
-        // PASS 2: inheritance checks
+        // PASS 2: inheritance checks (+ base default-ctor availability)
         ct.check_inheritance();
 
         // PASS 3: overrides
@@ -63,7 +63,7 @@ struct ProgramAnalyzer {
 
         analyzer.set_class_table(&ct);
 
-        // Builtins always available
+        // builtins always available
         add_builtins(global);
 
         // PASS 1: function signatures

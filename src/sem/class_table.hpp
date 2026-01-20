@@ -16,11 +16,16 @@ struct MethodSymbol {
     bool is_virtual = false;
 };
 
+struct CtorSymbol {
+    std::vector<ast::Type> param_types;
+};
+
 struct ClassSymbol {
     std::string name;
     std::string base_name; // empty if none
 
     std::unordered_map<std::string, ast::Type> fields; // own fields
+    std::vector<CtorSymbol> ctors;                     // own ctors (NEW)
     std::unordered_map<std::string, std::vector<MethodSymbol>> methods; // own methods
 };
 
@@ -82,6 +87,27 @@ struct ClassTable {
             cs.fields.emplace(f.name, f.type);
         }
 
+        // ctors (NEW)
+        cs.ctors.clear();
+        for (const auto& ctor : c.ctors) {
+            CtorSymbol sym;
+            sym.param_types.reserve(ctor.params.size());
+            for (const auto& p : ctor.params) sym.param_types.push_back(p.type);
+
+            for (const auto& existing : cs.ctors) {
+                if (same_params(existing.param_types, sym.param_types)) {
+                    throw std::runtime_error("semantic error: constructor overload redefinition in class " + c.name);
+                }
+            }
+            cs.ctors.push_back(std::move(sym));
+        }
+
+        // synthesize default ctor if none exists (spec rule)
+        if (cs.ctors.empty()) {
+            CtorSymbol def;
+            cs.ctors.push_back(std::move(def));
+        }
+
         for (const auto& m : c.methods) {
             MethodSymbol ms;
             ms.name = m.name;
@@ -108,6 +134,7 @@ struct ClassTable {
             }
         }
 
+        // cycle check
         enum class Mark { None, Temp, Perm };
         std::unordered_map<std::string, Mark> mark;
         for (const auto& [name, _] : classes) mark[name] = Mark::None;
@@ -125,6 +152,19 @@ struct ClassTable {
         };
 
         for (const auto& [name, _] : classes) dfs(dfs, name);
+
+        // base default-ctor must exist (directly or synthesized)
+        for (const auto& [name, cs] : classes) {
+            if (cs.base_name.empty()) continue;
+            const auto& base = get_class(cs.base_name);
+            bool has_default = false;
+            for (const auto& ctor : base.ctors) {
+                if (ctor.param_types.empty()) { has_default = true; break; }
+            }
+            if (!has_default) {
+                throw std::runtime_error("semantic error: base class has no default constructor: " + cs.base_name);
+            }
+        }
     }
 
     const MethodSymbol* find_exact_in_chain(const std::string& class_name, const MethodSymbol& wanted) const {
@@ -237,6 +277,46 @@ struct ClassTable {
         }
 
         if (!best) throw std::runtime_error("semantic error: no matching overload: " + method);
+        return *best;
+    }
+
+    // NEW: resolve constructor overload by exact signature (incl. & + lvalue rule)
+    const CtorSymbol& resolve_ctor_call(const std::string& class_name,
+                                       const std::vector<ast::Type>& arg_base_types,
+                                       const std::vector<bool>& arg_is_lvalue) const {
+        const auto& cs = get_class(class_name);
+
+        const CtorSymbol* best = nullptr;
+        int best_score = -1;
+
+        for (const auto& cand : cs.ctors) {
+            if (cand.param_types.size() != arg_base_types.size()) continue;
+
+            bool ok = true;
+            int score = 0;
+
+            for (size_t i = 0; i < arg_base_types.size(); ++i) {
+                ast::Type par = cand.param_types[i];
+                ast::Type par_base = base_type(par);
+                if (par_base != arg_base_types[i]) { ok = false; break; }
+
+                if (par.is_ref) {
+                    if (!arg_is_lvalue[i]) { ok = false; break; }
+                    score += 1;
+                }
+            }
+
+            if (!ok) continue;
+
+            if (score > best_score) {
+                best_score = score;
+                best = &cand;
+            } else if (score == best_score) {
+                throw std::runtime_error("semantic error: ambiguous constructor call: " + class_name);
+            }
+        }
+
+        if (!best) throw std::runtime_error("semantic error: no matching constructor: " + class_name);
         return *best;
     }
 };
