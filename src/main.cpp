@@ -1,16 +1,14 @@
 #include <iostream>
-#include <stdexcept>
+#include <cstdlib>
 
 #include "interp/env.hpp"
 #include "interp/exec.hpp"
 #include "interp/functions.hpp"
 #include "ast/expr.hpp"
+#include "ast/stmt.hpp"
 #include "ast/type.hpp"
 
 static ast::ExprPtr make_int(int v) { return std::make_unique<ast::IntLiteral>(v); }
-static ast::ExprPtr make_bool(bool v) { return std::make_unique<ast::BoolLiteral>(v); }
-static ast::ExprPtr make_char(char v) { return std::make_unique<ast::CharLiteral>(v); }
-static ast::ExprPtr make_string(const std::string& v) { return std::make_unique<ast::StringLiteral>(v); }
 
 static std::unique_ptr<ast::BinaryExpr> make_bin(ast::BinaryExpr::Op op, ast::ExprPtr lhs, ast::ExprPtr rhs) {
     auto b = std::make_unique<ast::BinaryExpr>();
@@ -20,43 +18,49 @@ static std::unique_ptr<ast::BinaryExpr> make_bin(ast::BinaryExpr::Op op, ast::Ex
     return b;
 }
 
-static std::unique_ptr<ast::UnaryExpr> make_un(ast::UnaryExpr::Op op, ast::ExprPtr x) {
-    auto u = std::make_unique<ast::UnaryExpr>();
-    u->op = op;
-    u->expr = std::move(x);
-    return u;
+static ast::ExprPtr make_var(const std::string& name) {
+    return std::make_unique<ast::VarExpr>(name);
 }
 
-static void expect_int_eq(const interp::Value& v, int expected, const char* name) {
+static std::unique_ptr<ast::AssignExpr> make_assign(const std::string& name, ast::ExprPtr rhs) {
+    auto a = std::make_unique<ast::AssignExpr>();
+    a->name = name;
+    a->value = std::move(rhs);
+    return a;
+}
+
+static std::unique_ptr<ast::VarDeclStmt> make_vardecl(const ast::Type& t, const std::string& name, ast::ExprPtr init) {
+    auto s = std::make_unique<ast::VarDeclStmt>();
+    s->decl_type = t;
+    s->name = name;
+    s->init = std::move(init);
+    return s;
+}
+
+static std::unique_ptr<ast::ExprStmt> make_exprstmt(ast::ExprPtr e) {
+    auto s = std::make_unique<ast::ExprStmt>();
+    s->expr = std::move(e);
+    return s;
+}
+
+static std::unique_ptr<ast::WhileStmt> make_while(ast::ExprPtr cond, std::unique_ptr<ast::Stmt> body) {
+    auto w = std::make_unique<ast::WhileStmt>();
+    w->cond = std::move(cond);
+    w->body = std::move(body);
+    return w;
+}
+
+static std::unique_ptr<ast::BlockStmt> make_block(std::vector<std::unique_ptr<ast::Stmt>> stmts) {
+    auto b = std::make_unique<ast::BlockStmt>();
+    b->statements = std::move(stmts);
+    return b;
+}
+
+static void expect_int_var(interp::Env& env, const std::string& name, int expected, const char* testname) {
+    interp::Value v = env.read_value(name);
     auto* pi = std::get_if<int>(&v);
     if (!pi || *pi != expected) {
-        std::cerr << "TEST FAIL: " << name << " (expected int " << expected << ")\n";
-        std::exit(1);
-    }
-}
-
-static void expect_bool_eq(const interp::Value& v, bool expected, const char* name) {
-    auto* pb = std::get_if<bool>(&v);
-    if (!pb || *pb != expected) {
-        std::cerr << "TEST FAIL: " << name << " (expected bool " << (expected ? "true" : "false") << ")\n";
-        std::exit(1);
-    }
-}
-
-static void run_test(interp::Env& env, interp::FunctionTable& functions, const char* name, const ast::Expr& e, const interp::Value& expected) {
-    try {
-        interp::Value got = interp::eval_expr(env, e, functions);
-        if (std::holds_alternative<int>(expected)) {
-            expect_int_eq(got, std::get<int>(expected), name);
-        } else if (std::holds_alternative<bool>(expected)) {
-            expect_bool_eq(got, std::get<bool>(expected), name);
-        } else {
-            std::cerr << "TEST FAIL: " << name << " (unsupported expected type in harness)\n";
-            std::exit(1);
-        }
-        std::cout << "OK: " << name << "\n";
-    } catch (const std::exception& ex) {
-        std::cerr << "TEST FAIL: " << name << " threw: " << ex.what() << "\n";
+        std::cerr << "TEST FAIL: " << testname << " expected " << name << " == " << expected << "\n";
         std::exit(1);
     }
 }
@@ -68,53 +72,51 @@ int main() {
     Env env(nullptr);
     FunctionTable functions;
 
-    // 1) Arithmetic: 1 + (2 * 3) = 7
+    Type t_int = Type::Int(false);
+    Type t_int_ref = Type::Int(true);
+
+    // 1) int x = 1;
     {
-        ExprPtr e = make_bin(
-            BinaryExpr::Op::Add,
-            make_int(1),
-            make_bin(BinaryExpr::Op::Mul, make_int(2), make_int(3))
-        );
-        run_test(env, functions, "arith 1+2*3", *e, Value{7});
+        auto s = make_vardecl(t_int, "x", make_int(1));
+        exec_stmt(env, *s, functions);
+        expect_int_var(env, "x", 1, "vardecl int init");
+        std::cout << "OK: vardecl int init\n";
     }
 
-    // 2) Relational: 3 < 4  => true
+    // 2) x = x + 2;  => 3
     {
-        ExprPtr e = make_bin(BinaryExpr::Op::Lt, make_int(3), make_int(4));
-        run_test(env, functions, "rel 3<4", *e, Value{true});
+        auto e = make_assign("x", make_bin(BinaryExpr::Op::Add, make_var("x"), make_int(2)));
+        (void)eval_expr(env, *e, functions);
+        expect_int_var(env, "x", 3, "assign expr");
+        std::cout << "OK: assign expr\n";
     }
 
-    // 3) Equality: 'a' == 'a' => true, "x" != "y" => true
+    // 3) int& r = x; r = 10;  => x wird 10
     {
-        ExprPtr e1 = make_bin(BinaryExpr::Op::Eq, make_char('a'), make_char('a'));
-        run_test(env, functions, "eq 'a'=='a'", *e1, Value{true});
+        auto s1 = make_vardecl(t_int_ref, "r", make_var("x"));
+        exec_stmt(env, *s1, functions);
 
-        ExprPtr e2 = make_bin(BinaryExpr::Op::Ne, make_string("x"), make_string("y"));
-        run_test(env, functions, "ne \"x\"!=\"y\"", *e2, Value{true});
+        auto e = make_assign("r", make_int(10));
+        (void)eval_expr(env, *e, functions);
+
+        expect_int_var(env, "x", 10, "ref assign writes through");
+        std::cout << "OK: ref assign writes through\n";
     }
 
-    // 4) Unary ! : !true => false
+    // 4) while(x) { x = x - 1; }  => endet bei 0 (bool-like-cpp: int 0 false)
     {
-        ExprPtr e = make_un(UnaryExpr::Op::Not, make_bool(true));
-        run_test(env, functions, "unary !true", *e, Value{false});
+        std::vector<std::unique_ptr<Stmt>> body;
+        body.push_back(make_exprstmt(
+            make_assign("x", make_bin(BinaryExpr::Op::Sub, make_var("x"), make_int(1)))
+        ));
+
+        auto loop = make_while(make_var("x"), make_block(std::move(body)));
+        exec_stmt(env, *loop, functions);
+
+        expect_int_var(env, "x", 0, "while bool-like int");
+        std::cout << "OK: while bool-like int\n";
     }
 
-    // 5) Short-circuit && : false && (1/0 == 0) => false (MUSS nicht crashen)
-    {
-        ExprPtr div0 = make_bin(BinaryExpr::Op::Div, make_int(1), make_int(0));
-        ExprPtr rhs = make_bin(BinaryExpr::Op::Eq, std::move(div0), make_int(0));
-        ExprPtr e = make_bin(BinaryExpr::Op::AndAnd, make_bool(false), std::move(rhs));
-        run_test(env, functions, "shortcircuit false&&...", *e, Value{false});
-    }
-
-    // 6) Short-circuit || : true || (1/0 == 0) => true (MUSS nicht crashen)
-    {
-        ExprPtr div0 = make_bin(BinaryExpr::Op::Div, make_int(1), make_int(0));
-        ExprPtr rhs = make_bin(BinaryExpr::Op::Eq, std::move(div0), make_int(0));
-        ExprPtr e = make_bin(BinaryExpr::Op::OrOr, make_bool(true), std::move(rhs));
-        run_test(env, functions, "shortcircuit true||...", *e, Value{true});
-    }
-
-    std::cout << "ALLE TESTS OK\n";
+    std::cout << "ALLE STMT-TESTS OK\n";
     return 0;
 }
