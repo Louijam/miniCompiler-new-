@@ -36,8 +36,16 @@ struct VarExpr : Expr {
     explicit VarExpr(std::string n) : name(std::move(n)) {}
 };
 
+// Assignment to variable only. Field assignment is represented by FieldAssignExpr.
 struct AssignExpr : Expr {
-    std::string name;   // assignment to variable only (members later)
+    std::string name;
+    ExprPtr value;
+};
+
+// NEW: obj.f = expr
+struct FieldAssignExpr : Expr {
+    ExprPtr object;
+    std::string field;
     ExprPtr value;
 };
 
@@ -62,13 +70,19 @@ struct CallExpr : Expr {
     std::vector<ExprPtr> args;
 };
 
-// -------- NEW: obj.f ----------
+// NEW: T(args) - object construction expression (used for: T x = T(args);)
+struct ConstructExpr : Expr {
+    std::string class_name;
+    std::vector<ExprPtr> args;
+};
+
+// obj.f
 struct MemberAccessExpr : Expr {
     ExprPtr object;
     std::string field;
 };
 
-// -------- NEW: obj.m(args) ----------
+// obj.m(args)
 struct MethodCallExpr : Expr {
     ExprPtr object;
     std::string method;
