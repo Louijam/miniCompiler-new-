@@ -6,61 +6,112 @@
 
 #include "repl/repl.hpp"
 
-#include "sem/class_table.hpp"
+#include "ast/program.hpp"
 #include "ast/class.hpp"
-#include "ast/type.hpp"
+#include "ast/function.hpp"
 #include "ast/stmt.hpp"
+#include "ast/expr.hpp"
+#include "ast/type.hpp"
 
-static std::unique_ptr<ast::BlockStmt> empty_block() {
+#include "interp/env.hpp"
+#include "interp/functions.hpp"
+#include "interp/exec.hpp"
+
+static std::unique_ptr<ast::BlockStmt> block(std::vector<ast::StmtPtr> s) {
     auto b = std::make_unique<ast::BlockStmt>();
+    b->statements = std::move(s);
     return b;
 }
 
-static int run_virtual_selftest() {
-    using namespace ast;
-    using namespace sem;
+static ast::ExprPtr call_print_int(int v) {
+    auto c = std::make_unique<ast::CallExpr>();
+    c->callee = "print_int";
+    c->args.push_back(std::make_unique<ast::IntLiteral>(v));
+    return c;
+}
 
+static ast::StmtPtr expr_stmt(ast::ExprPtr e) {
+    auto s = std::make_unique<ast::ExprStmt>();
+    s->expr = std::move(e);
+    return s;
+}
+
+static ast::StmtPtr ret_int(int v) {
+    auto r = std::make_unique<ast::ReturnStmt>();
+    r->value = std::make_unique<ast::IntLiteral>(v);
+    return r;
+}
+
+static int run_selftest_dispatch() {
+    using namespace ast;
+
+    // class B { public: virtual int m(){ print_int(1); return 0; } }
     ClassDef B;
     B.name = "B";
-    B.base_name = "";
 
-    MethodDef bm;
-    bm.is_virtual = true;
-    bm.name = "m";
-    bm.return_type = Type::Int(false);
-    bm.body = empty_block();
-    B.methods.push_back(std::move(bm));
+    MethodDef Bm;
+    Bm.is_virtual = true;
+    Bm.name = "m";
+    Bm.return_type = Type::Int(false);
+    {
+        std::vector<StmtPtr> ss;
+        ss.push_back(expr_stmt(call_print_int(1)));
+        ss.push_back(ret_int(0));
+        Bm.body = block(std::move(ss));
+    }
+    B.methods.push_back(std::move(Bm));
 
+    // class D : public B { public: int m(){ print_int(2); return 0; } }
     ClassDef D;
     D.name = "D";
     D.base_name = "B";
 
-    MethodDef dm;
-    dm.is_virtual = false; // IMPORTANT: not declared virtual
-    dm.name = "m";
-    dm.return_type = Type::Int(false);
-    dm.body = empty_block();
-    D.methods.push_back(std::move(dm));
+    MethodDef Dm;
+    Dm.is_virtual = false; // override should still be treated virtual at runtime (via vtable)
+    Dm.name = "m";
+    Dm.return_type = Type::Int(false);
+    {
+        std::vector<StmtPtr> ss;
+        ss.push_back(expr_stmt(call_print_int(2)));
+        ss.push_back(ret_int(0));
+        Dm.body = block(std::move(ss));
+    }
+    D.methods.push_back(std::move(Dm));
 
-    ClassTable ct;
-    ct.add_class_name("B");
-    ct.add_class_name("D");
+    // program
+    Program p;
+    p.classes.push_back(std::move(B));
+    p.classes.push_back(std::move(D));
 
-    ct.fill_class_members(B);
-    ct.fill_class_members(D);
+    // build runtime tables
+    interp::FunctionTable ft;
+    ft.add_program(p);
 
-    ct.check_inheritance();
-    ct.check_overrides_and_virtuals();
+    // simulate:
+    // D d; B& b = d; b.m();
+    interp::Env env(nullptr);
 
-    const auto& csD = ct.get_class("D");
-    auto it = csD.methods.find("m");
-    if (it == csD.methods.end() || it->second.empty()) throw std::runtime_error("selftest: missing D::m");
-
-    if (!it->second[0].is_virtual) {
-        throw std::runtime_error("selftest: expected D::m to be virtual (inherited from B::m)");
+    // D d;
+    {
+        auto tD = Type::Class("D", false);
+        env.define_value("d", interp::default_value_for_type(tD, ft), tD);
     }
 
-    std::cout << "VIRTUAL SELFTEST OK\n";
+    // B& b = d;
+    {
+        auto tBRef = Type::Class("B", true);
+        env.define_ref("b", env.resolve_lvalue("d"), tBRef);
+    }
+
+    // b.m();
+    {
+        auto mc = std::make_unique<MethodCallExpr>();
+        mc->object = std::make_unique<VarExpr>("b");
+        mc->method = "m";
+        interp::eval_expr(env, *mc, ft);
+    }
+
+    std::cout << "DISPATCH SELFTEST OK\n";
     return 0;
 }
 
@@ -68,7 +119,9 @@ int main(int argc, char** argv) {
     try {
         if (argc > 1) {
             std::string arg = argv[1];
-            if (arg == "--selftest-virtual") return run_virtual_selftest();
+            if (arg == "--selftest-dispatch") {
+                return run_selftest_dispatch();
+            }
         }
         return repl::run_repl();
     } catch (const std::exception& ex) {

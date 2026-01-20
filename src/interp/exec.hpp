@@ -7,6 +7,7 @@
 #include "functions.hpp"
 #include "lvalue.hpp"
 #include "object.hpp"
+#include "value.hpp"
 #include "../ast/stmt.hpp"
 #include "../ast/expr.hpp"
 #include "../ast/type.hpp"
@@ -35,6 +36,18 @@ inline bool expect_bool(const Value& v, const char* ctx) {
     throw std::runtime_error(std::string("type error: expected bool in ") + ctx);
 }
 
+inline ast::Type type_of_value(const Value& v) {
+    if (std::holds_alternative<bool>(v)) return ast::Type::Bool(false);
+    if (std::holds_alternative<int>(v)) return ast::Type::Int(false);
+    if (std::holds_alternative<char>(v)) return ast::Type::Char(false);
+    if (std::holds_alternative<std::string>(v)) return ast::Type::String(false);
+    if (auto* o = std::get_if<ObjectPtr>(&v)) {
+        if (!*o) throw std::runtime_error("null object value");
+        return ast::Type::Class((*o)->dynamic_class, false);
+    }
+    throw std::runtime_error("unknown runtime value kind");
+}
+
 inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions);
 
 inline LValue eval_lvalue(Env& env, const ast::Expr& e, FunctionTable& functions) {
@@ -54,6 +67,11 @@ inline LValue eval_lvalue(Env& env, const ast::Expr& e, FunctionTable& functions
     throw std::runtime_error("expected lvalue");
 }
 
+inline bool is_lvalue_expr(const ast::Expr& e) {
+    return dynamic_cast<const ast::VarExpr*>(&e) != nullptr
+        || dynamic_cast<const ast::MemberAccessExpr*>(&e) != nullptr;
+}
+
 inline Value default_value_for_type(const ast::Type& t, FunctionTable& functions);
 
 inline ObjectPtr default_construct_object(const std::string& class_name, FunctionTable& functions) {
@@ -61,35 +79,23 @@ inline ObjectPtr default_construct_object(const std::string& class_name, Functio
     obj->dynamic_class = class_name;
 
     const auto& ci = functions.class_rt.get(class_name);
-
     for (const auto& kv : ci.merged_fields) {
         obj->fields[kv.first] = default_value_for_type(kv.second, functions);
     }
+
     return obj;
 }
 
 inline Value default_value_for_type(const ast::Type& t, FunctionTable& functions) {
-    using namespace ast;
+    using Base = ast::Type::Base;
 
-    if (t.base == Type::Base::Bool) return Value{false};
-    if (t.base == Type::Base::Int) return Value{0};
-    if (t.base == Type::Base::Char) return Value{char('\0')};
-    if (t.base == Type::Base::String) return Value{std::string("")};
-    if (t.base == Type::Base::Class) {
-        return Value{default_construct_object(t.class_name, functions)};
-    }
+    if (t.base == Base::Bool) return Value{false};
+    if (t.base == Base::Int) return Value{0};
+    if (t.base == Base::Char) return Value{char('\0')};
+    if (t.base == Base::String) return Value{std::string("")};
+    if (t.base == Base::Class) return Value{default_construct_object(t.class_name, functions)};
+
     return Value{0};
-}
-
-inline void bind_fields_as_refs(Env& method_env, const ObjectPtr& self, const std::string& static_class, FunctionTable& functions) {
-    // Expose fields as unqualified names (no this).
-    // We bind by ref so assignments change the actual object storage.
-    const auto& ci = functions.class_rt.get(static_class);
-    for (const auto& kv : ci.merged_fields) {
-        const std::string& fname = kv.first;
-        const ast::Type& ftype = kv.second;
-        method_env.define_ref(fname, LValue::field_of(self, fname), ast::Type::Ref(ftype));
-    }
 }
 
 inline Value call_builtin(const std::string& name, const std::vector<Value>& args) {
@@ -117,22 +123,21 @@ inline Value call_builtin(const std::string& name, const std::vector<Value>& arg
     throw std::runtime_error("unknown builtin: " + name);
 }
 
-inline Value call_function(Env& env, ast::FunctionDef& f, const std::vector<Value>& arg_vals, FunctionTable& functions) {
-    Env callee(&env);
+inline void exec_stmt(Env& env, const ast::Stmt& s, FunctionTable& functions);
 
-    // bind parameters
+inline Value call_function(Env& caller_env,
+                           ast::FunctionDef& f,
+                           const std::vector<Value>& arg_vals,
+                           const std::vector<LValue>& arg_lvals,
+                           FunctionTable& functions) {
+    Env callee(&caller_env);
+
     for (size_t i = 0; i < f.params.size(); ++i) {
         const auto& p = f.params[i];
-        const auto& t = p.type;
-
-        if (t.is_ref) {
-            // reference arg must come from an lvalue in the caller; we pass it as ObjectPtr/Value is not enough here.
-            // In this interpreter, ref passing is handled by the AST: the caller will bind ref-params via eval_lvalue.
-            // So for free functions we expect the caller to have created a RefSlot already if needed.
-            // Here: treat it as value-parameter (fallback) -> should be avoided by semantics/tests.
-            callee.define_value(p.name, arg_vals[i], t);
+        if (p.type.is_ref) {
+            callee.define_ref(p.name, arg_lvals[i], p.type);
         } else {
-            callee.define_value(p.name, arg_vals[i], t);
+            callee.define_value(p.name, arg_vals[i], p.type);
         }
     }
 
@@ -144,28 +149,35 @@ inline Value call_function(Env& env, ast::FunctionDef& f, const std::vector<Valu
     return Value{0};
 }
 
-inline Value call_method(Env& env,
+inline void bind_fields_as_refs(Env& method_env,
+                                const ObjectPtr& self,
+                                const std::string& static_class,
+                                FunctionTable& functions) {
+    const auto& ci = functions.class_rt.get(static_class);
+    for (const auto& kv : ci.merged_fields) {
+        ast::Type rt = kv.second;
+        rt.is_ref = true;
+        method_env.define_ref(kv.first, LValue::field_of(self, kv.first), rt);
+    }
+}
+
+inline Value call_method(Env& caller_env,
                          const ObjectPtr& self,
                          const std::string& static_class,
-                         const std::string& dynamic_class,
                          const ast::MethodDef& m,
                          const std::vector<Value>& arg_vals,
                          const std::vector<LValue>& arg_lvals,
                          FunctionTable& functions) {
-    // Methods have access to fields + their params/locals.
-    // No "this": fields are injected as refs.
-    Env method_env(&env);
+    Env method_env(&caller_env);
 
     bind_fields_as_refs(method_env, self, static_class, functions);
 
     for (size_t i = 0; i < m.params.size(); ++i) {
         const auto& p = m.params[i];
-        const auto& t = p.type;
-
-        if (t.is_ref) {
-            method_env.define_ref(p.name, arg_lvals[i], t);
+        if (p.type.is_ref) {
+            method_env.define_ref(p.name, arg_lvals[i], p.type);
         } else {
-            method_env.define_value(p.name, arg_vals[i], t);
+            method_env.define_value(p.name, arg_vals[i], p.type);
         }
     }
 
@@ -182,8 +194,7 @@ inline void exec_stmt(Env& env, const ast::Stmt& s, FunctionTable& functions) {
 
     if (auto* b = dynamic_cast<const BlockStmt*>(&s)) {
         Env local(&env);
-        for (auto& st : b->statements)
-            exec_stmt(local, *st, functions);
+        for (auto& st : b->statements) exec_stmt(local, *st, functions);
         return;
     }
 
@@ -191,12 +202,12 @@ inline void exec_stmt(Env& env, const ast::Stmt& s, FunctionTable& functions) {
         const ast::Type& t = v->decl_type;
 
         if (t.is_ref) {
-            if (!v->init)
-                throw std::runtime_error("Referenzvariable muss initialisiert werden");
+            if (!v->init) throw std::runtime_error("Referenzvariable muss initialisiert werden");
             LValue target = eval_lvalue(env, *v->init, functions);
             env.define_ref(v->name, target, t);
         } else {
-            Value init = v->init ? eval_expr(env, *v->init, functions) : default_value_for_type(t, functions);
+            Value init = v->init ? eval_expr(env, *v->init, functions)
+                                 : default_value_for_type(t, functions);
             env.define_value(v->name, init, t);
         }
         return;
@@ -209,10 +220,8 @@ inline void exec_stmt(Env& env, const ast::Stmt& s, FunctionTable& functions) {
 
     if (auto* i = dynamic_cast<const IfStmt*>(&s)) {
         bool cond = to_bool_like_cpp(eval_expr(env, *i->cond, functions));
-        if (cond)
-            exec_stmt(env, *i->then_branch, functions);
-        else if (i->else_branch)
-            exec_stmt(env, *i->else_branch, functions);
+        if (cond) exec_stmt(env, *i->then_branch, functions);
+        else if (i->else_branch) exec_stmt(env, *i->else_branch, functions);
         return;
     }
 
@@ -238,8 +247,7 @@ inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions) {
     if (auto* c = dynamic_cast<const CharLiteral*>(&e)) return c->value;
     if (auto* s = dynamic_cast<const StringLiteral*>(&e)) return s->value;
 
-    if (auto* v = dynamic_cast<const VarExpr*>(&e))
-        return env.read_value(v->name);
+    if (auto* v = dynamic_cast<const VarExpr*>(&e)) return env.read_value(v->name);
 
     if (auto* a = dynamic_cast<const AssignExpr*>(&e)) {
         Value rhs = eval_expr(env, *a->value, functions);
@@ -260,13 +268,11 @@ inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions) {
     }
 
     if (auto* ce = dynamic_cast<const ConstructExpr*>(&e)) {
-        // Evaluate ctor args (we do not execute ctor body yet; we just construct default + set dynamic_class)
-        (void)ce; // keep unused-warning away if ctors not executed yet
+        for (const auto& a2 : ce->args) (void)eval_expr(env, *a2, functions);
         return Value{default_construct_object(ce->class_name, functions)};
     }
 
     if (auto* call = dynamic_cast<const CallExpr*>(&e)) {
-        // builtins
         if (call->callee.rfind("print_", 0) == 0) {
             std::vector<Value> args;
             args.reserve(call->args.size());
@@ -275,20 +281,28 @@ inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions) {
         }
 
         std::vector<Value> arg_vals;
+        std::vector<LValue> arg_lvals;
         std::vector<ast::Type> arg_types;
+        std::vector<bool> arg_is_lvalue;
+
         arg_vals.reserve(call->args.size());
+        arg_lvals.reserve(call->args.size());
         arg_types.reserve(call->args.size());
+        arg_is_lvalue.reserve(call->args.size());
 
         for (auto& a2 : call->args) {
-            arg_vals.push_back(eval_expr(env, *a2, functions));
-            // runtime: type tracking not fully implemented -> assume sema ensured correct overload.
-            // We still pass "base types" derived from the AST by reading param types later; for now: use Int as placeholder if unknown.
-            // In practice: parser+sema will let us compute these properly.
-            arg_types.push_back(ast::Type::Int(false));
+            bool lv = is_lvalue_expr(*a2);
+            arg_is_lvalue.push_back(lv);
+            if (lv) arg_lvals.push_back(eval_lvalue(env, *a2, functions));
+            else arg_lvals.push_back(LValue{});
+
+            Value vv = eval_expr(env, *a2, functions);
+            arg_vals.push_back(vv);
+            arg_types.push_back(type_of_value(vv));
         }
 
-        ast::FunctionDef& f = functions.resolve(call->callee, arg_types);
-        return call_function(env, f, arg_vals, functions);
+        ast::FunctionDef& f = functions.resolve(call->callee, arg_types, arg_is_lvalue);
+        return call_function(env, f, arg_vals, arg_lvals, functions);
     }
 
     if (auto* mc = dynamic_cast<const MethodCallExpr*>(&e)) {
@@ -299,14 +313,13 @@ inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions) {
         ObjectPtr self = *pobj;
         std::string dynamic_class = self->dynamic_class;
 
-        // static class: only reliable for VarExpr right now (good enough for B& b = d; b.m()).
         std::string static_class = dynamic_class;
         bool call_via_ref = false;
 
         if (auto* ov = dynamic_cast<const VarExpr*>(mc->object.get())) {
             ast::Type st = env.static_type_of(ov->name);
             call_via_ref = st.is_ref;
-            if (ast::Type::Base::Class == st.base) static_class = st.class_name;
+            if (st.base == ast::Type::Base::Class) static_class = st.class_name;
         }
 
         std::vector<Value> arg_vals;
@@ -320,26 +333,21 @@ inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions) {
         arg_is_lvalue.reserve(mc->args.size());
 
         for (auto& a2 : mc->args) {
-            // for ref params we need both: value + lvalue
-            bool is_lv = dynamic_cast<const VarExpr*>(a2.get()) != nullptr
-                      || dynamic_cast<const MemberAccessExpr*>(a2.get()) != nullptr;
+            bool lv = is_lvalue_expr(*a2);
+            arg_is_lvalue.push_back(lv);
+            if (lv) arg_lvals.push_back(eval_lvalue(env, *a2, functions));
+            else arg_lvals.push_back(LValue{});
 
-            arg_is_lvalue.push_back(is_lv);
-
-            if (is_lv) arg_lvals.push_back(eval_lvalue(env, *a2, functions));
-            else arg_lvals.push_back(LValue{}); // unused if not ref-param
-
-            arg_vals.push_back(eval_expr(env, *a2, functions));
-
-            // placeholder (see note in CallExpr)
-            arg_types.push_back(ast::Type::Int(false));
+            Value vv = eval_expr(env, *a2, functions);
+            arg_vals.push_back(vv);
+            arg_types.push_back(type_of_value(vv));
         }
 
         const ast::MethodDef& target =
             functions.class_rt.resolve_method(static_class, dynamic_class,
                                               mc->method, arg_types, arg_is_lvalue, call_via_ref);
 
-        return call_method(env, self, static_class, dynamic_class, target, arg_vals, arg_lvals, functions);
+        return call_method(env, self, static_class, target, arg_vals, arg_lvals, functions);
     }
 
     if (auto* u = dynamic_cast<const UnaryExpr*>(&e)) {

@@ -20,11 +20,13 @@ inline bool same_signature(const ast::FunctionDef& a, const ast::FunctionDef& b)
     return true;
 }
 
-// One place to carry "runtime globals" needed by the interpreter.
+inline ast::Type base_type(ast::Type t) { t.is_ref = false; return t; }
+
+// One place to carry runtime globals (functions + class runtime tables)
 struct FunctionTable {
     std::unordered_map<std::string, std::vector<ast::FunctionDef*>> functions;
 
-    // NEW: runtime info for classes (fields + vtable resolution)
+    // NEW: runtime info for classes (merged fields + vtable owner + virtual flags)
     ClassRuntime class_rt;
 
     void clear() {
@@ -43,42 +45,59 @@ struct FunctionTable {
         vec.push_back(&f);
     }
 
-    // NEW: build all runtime tables from a parsed/analyzed program
     void add_program(ast::Program& p) {
         clear();
-
         for (auto& f : p.functions) add(f);
-
-        // builds merged fields + vtable ownership + virtual flags
         class_rt.build(p);
     }
 
-    ast::FunctionDef& resolve(const std::string& name, const std::vector<ast::Type>& arg_types) {
+    // Overload resolution:
+    // - exact base type match
+    // - ref params require lvalue args
+    // - ambiguity if equal "ref score"
+    ast::FunctionDef& resolve(const std::string& name,
+                              const std::vector<ast::Type>& arg_base_types,
+                              const std::vector<bool>& arg_is_lvalue) {
         auto it = functions.find(name);
         if (it == functions.end()) {
             throw std::runtime_error("unknown function: " + name);
         }
 
-        std::vector<ast::FunctionDef*> candidates;
+        ast::FunctionDef* best = nullptr;
+        int best_score = -1;
 
         for (auto* f : it->second) {
-            if (f->params.size() != arg_types.size()) continue;
+            if (f->params.size() != arg_base_types.size()) continue;
 
             bool ok = true;
-            for (size_t i = 0; i < arg_types.size(); ++i) {
-                if (f->params[i].type != arg_types[i]) { ok = false; break; }
+            int score = 0;
+
+            for (size_t i = 0; i < arg_base_types.size(); ++i) {
+                ast::Type at = base_type(arg_base_types[i]);
+                ast::Type pt = f->params[i].type;
+
+                if (base_type(pt) != at) { ok = false; break; }
+
+                if (pt.is_ref) {
+                    if (!arg_is_lvalue[i]) { ok = false; break; }
+                    score += 1;
+                }
             }
-            if (ok) candidates.push_back(f);
+
+            if (!ok) continue;
+
+            if (score > best_score) {
+                best_score = score;
+                best = f;
+            } else if (score == best_score) {
+                throw std::runtime_error("ambiguous overload: " + name);
+            }
         }
 
-        if (candidates.empty()) {
+        if (!best) {
             throw std::runtime_error("no matching overload: " + name);
         }
-        if (candidates.size() > 1) {
-            throw std::runtime_error("ambiguous overload: " + name);
-        }
-
-        return *candidates[0];
+        return *best;
     }
 };
 
