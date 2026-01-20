@@ -13,6 +13,21 @@ namespace sem {
 struct ProgramAnalyzer {
     Analyzer analyzer;
 
+    static void add_builtin(Scope& global, const std::string& name, const ast::Type& param) {
+        FuncSymbol sym;
+        sym.name = name;
+        sym.return_type = ast::Type::Void();
+        sym.param_types = { param };
+        global.define_func(sym);
+    }
+
+    static void add_builtins(Scope& global) {
+        add_builtin(global, "print_bool",   ast::Type::Bool(false));
+        add_builtin(global, "print_int",    ast::Type::Int(false));
+        add_builtin(global, "print_char",   ast::Type::Char(false));
+        add_builtin(global, "print_string", ast::Type::String(false));
+    }
+
     static void check_main_signature(const Scope& global) {
         bool ok = false;
 
@@ -47,6 +62,9 @@ struct ProgramAnalyzer {
         ct.check_overrides_and_virtuals();
 
         analyzer.set_class_table(&ct);
+
+        // Builtins always available
+        add_builtins(global);
 
         // PASS 1: function signatures
         for (const auto& f : p.functions) {
