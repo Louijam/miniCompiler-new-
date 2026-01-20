@@ -218,12 +218,12 @@ inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions) {
         if (bin->op == BinaryExpr::Op::Lt || bin->op == BinaryExpr::Op::Le ||
             bin->op == BinaryExpr::Op::Gt || bin->op == BinaryExpr::Op::Ge) {
 
-            auto cmp_int = [&](int a, int b) -> bool {
+            auto cmp_int = [&](int a2, int b2) -> bool {
                 switch (bin->op) {
-                    case BinaryExpr::Op::Lt: return a < b;
-                    case BinaryExpr::Op::Le: return a <= b;
-                    case BinaryExpr::Op::Gt: return a > b;
-                    case BinaryExpr::Op::Ge: return a >= b;
+                    case BinaryExpr::Op::Lt: return a2 < b2;
+                    case BinaryExpr::Op::Le: return a2 <= b2;
+                    case BinaryExpr::Op::Gt: return a2 > b2;
+                    case BinaryExpr::Op::Ge: return a2 >= b2;
                     default: return false;
                 }
             };
@@ -240,29 +240,64 @@ inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions) {
         throw std::runtime_error("unknown binary op");
     }
 
+    if (auto* mc = dynamic_cast<const MethodCallExpr*>(&e)) {
+        Value ov = eval_expr(env, *mc->object, functions);
+        if (!std::holds_alternative<ObjectPtr>(ov)) throw std::runtime_error("runtime error: method call on non-object");
+        ObjectPtr obj = std::get<ObjectPtr>(ov);
+
+        std::vector<Type> arg_types;
+        arg_types.reserve(mc->args.size());
+        for (auto& a2 : mc->args) arg_types.push_back(eval_arg_type(env, *a2, functions));
+
+        std::string callee = obj->class_name + "::" + mc->method;
+        auto& f = functions.resolve(callee, arg_types);
+
+        Env call_env(&env);
+
+        call_env.define_value("this", obj);
+
+        for (size_t i = 0; i < f.params.size(); ++i) {
+            const auto& p = f.params[i];
+            if (p.type.is_ref) {
+                LValue target = eval_lvalue(env, *mc->args[i], functions);
+                call_env.define_ref(p.name, target);
+            } else {
+                Value v2 = eval_expr(env, *mc->args[i], functions);
+                call_env.define_value(p.name, v2);
+            }
+        }
+
+        try {
+            exec_stmt(call_env, *f.body, functions);
+        } catch (ReturnSignal& r) {
+            return r.value;
+        }
+        return Value{0};
+    }
+
     if (auto* c = dynamic_cast<const CallExpr*>(&e)) {
         if (c->callee == "print_int") {
             if (c->args.size() != 1) throw std::runtime_error("print_int expects 1 argument");
-            Value v = eval_expr(env, *c->args[0], functions);
-            std::cout << expect_int(v, "print_int") << "\n";
+            Value v2 = eval_expr(env, *c->args[0], functions);
+            std::cout << expect_int(v2, "print_int") << "\n";
             return Value{0};
         }
         if (c->callee == "print_bool") {
             if (c->args.size() != 1) throw std::runtime_error("print_bool expects 1 argument");
-            Value v = eval_expr(env, *c->args[0], functions);
-            std::cout << (expect_bool(v, "print_bool") ? "true" : "false") << "\n";
+            Value v2 = eval_expr(env, *c->args[0], functions);
+            std::cout << (expect_bool(v2, "print_bool") ? "true" : "false") << "\n";
             return Value{0};
         }
         if (c->callee == "print_char") {
             if (c->args.size() != 1) throw std::runtime_error("print_char expects 1 argument");
-            Value v = eval_expr(env, *c->args[0], functions);
-            std::cout << expect_char(v, "print_char") << "\n";
+            Value v2 = eval_expr(env, *c->args[0], functions);
+            std::cout << expect_char(v2, "print_char") << "\n";
             return Value{0};
         }
         if (c->callee == "print_string") {
             if (c->args.size() != 1) throw std::runtime_error("print_string expects 1 argument");
-            Value v = eval_expr(env, *c->args[0], functions);
-            std::cout << expect_string(v, "print_string") << "\n";
+            Value v2 = eval_expr(env, *c->args[0], functions);
+            std::cout << expect_string(v2, "print_string") << "\n";
             return Value{0};
         }
 
@@ -280,8 +315,8 @@ inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions) {
                 LValue target = eval_lvalue(env, *c->args[i], functions);
                 call_env.define_ref(p.name, target);
             } else {
-                Value v = eval_expr(env, *c->args[i], functions);
-                call_env.define_value(p.name, v);
+                Value v2 = eval_expr(env, *c->args[i], functions);
+                call_env.define_value(p.name, v2);
             }
         }
 
@@ -292,10 +327,6 @@ inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions) {
         }
 
         return Value{0};
-    }
-
-    if (dynamic_cast<const MethodCallExpr*>(&e)) {
-        throw std::runtime_error("runtime error: method calls not implemented yet");
     }
 
     throw std::runtime_error("unknown expression");
