@@ -6,7 +6,7 @@
 #include <string_view>
 #include <vector>
 
-#include "lexer/token.hpp"
+#include "token.hpp"
 
 namespace lexer {
 
