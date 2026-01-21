@@ -77,10 +77,7 @@ private:
     }
 
     bool match_lex(std::string_view lx) {
-        if (!is_end() && peek().lexeme == lx) {
-            ++i_;
-            return true;
-        }
+        if (!is_end() && peek().lexeme == lx) { ++i_; return true; }
         return false;
     }
 
@@ -90,13 +87,9 @@ private:
         }
     }
 
-    bool peek_lex(std::string_view lx) const {
-        return !is_end() && peek().lexeme == lx;
-    }
+    bool peek_lex(std::string_view lx) const { return !is_end() && peek().lexeme == lx; }
 
-    bool peek_is_ident() const {
-        return !is_end() && peek().kind == lexer::TokenKind::Identifier;
-    }
+    bool peek_is_ident() const { return !is_end() && peek().kind == lexer::TokenKind::Identifier; }
 
     std::string take_ident(const char* msg) {
         if (!peek_is_ident()) throw err_here(msg);
@@ -110,6 +103,7 @@ private:
         return ParseError("ParseError at " + std::to_string(t.line) + ":" + std::to_string(t.col) + ": " + msg);
     }
 
+    // ---------- types ----------
     ast::Type parse_type() {
         ast::Type t;
 
@@ -147,6 +141,7 @@ private:
         return ps;
     }
 
+    // ---------- program-level ----------
     ast::FunctionDef parse_function_def() {
         ast::FunctionDef f;
         f.return_type = parse_type();
@@ -171,21 +166,57 @@ private:
 
         expect_lex("{", "expected '{' in class body");
 
-        if (match_lex("public")) expect_lex(":", "expected ':' after 'public'");
+        if (match_lex("public")) {
+            expect_lex(":", "expected ':' after 'public'");
+        }
 
-        // For now: accept class bodies syntactically by skipping tokens until matching '}'
-        // Next step (optional): parse fields/methods/ctors using ast/class.hpp details.
-        int depth = 1;
-        while (!is_end() && depth > 0) {
-            if (match_lex("{")) depth++;
-            else if (match_lex("}")) depth--;
-            else ++i_;
+        while (!match_lex("}")) {
+            if (is_end()) throw err_here("unexpected end in class body");
+
+            bool is_virtual = false;
+            if (match_lex("virtual")) is_virtual = true;
+
+            // ctor: ClassName(...)
+            if (peek_is_ident() && peek().lexeme == c.name && peek(1).lexeme == "(") {
+                (void)take_ident("expected ctor name");
+                expect_lex("(", "expected '(' after ctor name");
+                ast::ConstructorDef ctor;
+                ctor.params = parse_param_list();
+                ctor.body = parse_block_stmt();
+                c.ctors.push_back(std::move(ctor));
+                continue;
+            }
+
+            ast::Type t = parse_type();
+            std::string member_name = take_ident("expected member name");
+
+            if (match_lex("(")) {
+                ast::MethodDef m;
+                m.is_virtual = is_virtual;
+                m.return_type = t;
+                m.name = member_name;
+                m.params = parse_param_list();
+                m.body = parse_block_stmt();
+                c.methods.push_back(std::move(m));
+            } else {
+                ast::FieldDecl f;
+                f.type = t;
+                f.name = member_name;
+
+                if (match_lex("=")) {
+                    (void)parse_expr(); // consume initializer
+                }
+
+                expect_lex(";", "expected ';' after field");
+                c.fields.push_back(std::move(f));
+            }
         }
 
         match_lex(";");
         return c;
     }
 
+    // ---------- statements ----------
     ast::StmtPtr parse_stmt() {
         if (peek_lex("{")) return parse_block_stmt();
 
@@ -231,6 +262,7 @@ private:
         return b;
     }
 
+    // ---------- expressions ----------
     ast::ExprPtr parse_expr() { return parse_assignment(); }
 
     ast::ExprPtr parse_assignment() {
@@ -420,19 +452,19 @@ private:
                             expect_lex(",", "expected ',' or ')'");
                         }
                     }
+
                     e = std::move(mc);
                     continue;
                 } else {
                     auto ma = std::make_unique<ast::MemberAccessExpr>();
                     ma->object = std::move(e);
                     ma->field = std::move(field);
+
                     e = std::move(ma);
                     continue;
                 }
             }
 
-            // Support chained call on expression: e(args) is not in AST right now (only CallExpr by name),
-            // so we do not parse that form.
             break;
         }
 
@@ -464,7 +496,6 @@ private:
         if (peek_is_ident()) {
             std::string name = take_ident("expected identifier");
 
-            // Call or construct: Name(args)
             if (match_lex("(")) {
                 std::vector<ast::ExprPtr> args;
                 if (!match_lex(")")) {
