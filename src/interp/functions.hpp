@@ -1,40 +1,50 @@
 #pragma once
-#include <unordered_map>
-#include <vector>
-#include <string>
-#include <stdexcept>
+// Verhindert mehrfaches Einbinden dieser Header-Datei
 
-#include "../ast/program.hpp"
-#include "../ast/function.hpp"
-#include "../ast/type.hpp"
-#include "class_runtime.hpp"
+#include <unordered_map>   // std::unordered_map
+#include <vector>          // std::vector
+#include <string>          // std::string
+#include <stdexcept>       // std::runtime_error
+
+#include "../ast/program.hpp"   // AST-Wurzel (Program)
+#include "../ast/function.hpp"  // Funktionsdefinitionen
+#include "../ast/type.hpp"      // Typrepräsentation
+#include "class_runtime.hpp"    // Laufzeitinformationen fuer Klassen
 
 namespace interp {
 
+// Prüft, ob zwei Funktionsdefinitionen exakt die gleiche Signatur haben
 inline bool same_signature(const ast::FunctionDef& a, const ast::FunctionDef& b) {
-    if (a.name != b.name) return false;
-    if (a.params.size() != b.params.size()) return false;
+    if (a.name != b.name) return false;                 // Funktionsname
+    if (a.params.size() != b.params.size()) return false; // Anzahl Parameter
     for (size_t i = 0; i < a.params.size(); ++i) {
-        if (a.params[i].type != b.params[i].type) return false;
+        if (a.params[i].type != b.params[i].type) return false; // Parametertypen
     }
     return true;
 }
 
-inline ast::Type base_type(ast::Type t) { t.is_ref = false; return t; }
+// Hilfsfunktion: entfernt Referenzinformation aus einem Typ
+inline ast::Type base_type(ast::Type t) {
+    t.is_ref = false;
+    return t;
+}
 
-// One place to carry runtime globals (functions + class runtime tables)
+// Zentrale Runtime-Struktur fuer globale Funktionen und Klassen
 struct FunctionTable {
+    // Funktionsname -> Liste aller Overloads
     std::unordered_map<std::string, std::vector<ast::FunctionDef*>> functions;
 
-    // NEW: runtime info for classes (merged fields + vtable owner + virtual flags)
+    // Laufzeitinformationen fuer Klassen (Felder, VTables, Vererbung)
     ClassRuntime class_rt;
 
+    // Setzt alle Runtime-Daten zurueck
     void clear() {
         functions.clear();
         class_rt.classes.clear();
         class_rt.prog = nullptr;
     }
 
+    // Fuegt eine Funktionsdefinition hinzu (inkl. Duplikat-Check)
     void add(ast::FunctionDef& f) {
         auto& vec = functions[f.name];
         for (auto* existing : vec) {
@@ -45,16 +55,18 @@ struct FunctionTable {
         vec.push_back(&f);
     }
 
+    // Initialisiert die FunctionTable aus einem kompletten Programm
     void add_program(ast::Program& p) {
         clear();
         for (auto& f : p.functions) add(f);
         class_rt.build(p);
     }
 
-    // Overload resolution:
-    // - exact base type match
-    // - ref params require lvalue args
-    // - ambiguity if equal "ref score"
+    // Overload-Auflösung fuer freie Funktionen:
+    // - exakte Übereinstimmung der Basistypen
+    // - Referenzparameter erfordern LValue-Argumente
+    // - best_score = Anzahl passender Referenzen
+    // - Ambiguität bei gleichem Score
     ast::FunctionDef& resolve(const std::string& name,
                               const std::vector<ast::Type>& arg_base_types,
                               const std::vector<bool>& arg_is_lvalue) {
@@ -76,8 +88,10 @@ struct FunctionTable {
                 ast::Type at = base_type(arg_base_types[i]);
                 ast::Type pt = f->params[i].type;
 
+                // Basistyp muss exakt passen
                 if (base_type(pt) != at) { ok = false; break; }
 
+                // Referenzparameter: Argument muss LValue sein
                 if (pt.is_ref) {
                     if (!arg_is_lvalue[i]) { ok = false; break; }
                     score += 1;

@@ -1,56 +1,76 @@
 #pragma once
-#include <stdexcept>
-#include <string>
+// Verhindert mehrfaches Einbinden dieser Header-Datei
 
-#include "env.hpp"
-#include "functions.hpp"
-#include "object.hpp"
-#include "value.hpp"
-#include "../ast/type.hpp"
+#include <stdexcept>   // std::runtime_error
+#include <string>      // std::string
+
+#include "env.hpp"         // Laufzeit-Umgebung (Variablen, Typinfos)
+#include "functions.hpp"   // Funktionstabelle + Klassen-Runtime-Infos
+#include "object.hpp"      // Objekt-Repräsentation (Object, Felder, dynamic_class)
+#include "value.hpp"       // Laufzeitwerte (Value, z.B. int, bool, ObjectPtr)
+#include "../ast/type.hpp" // AST-Typdefinitionen
 
 namespace interp {
 
-// Assign to a named variable (NOT a field) with correct slicing behavior.
-// - If LHS is class value (not ref) and RHS is class value and types differ by inheritance,
-//   copy only the LHS static class fields (slicing) and set dynamic_class to LHS static class.
-// - Otherwise: normal assignment.
+// Weist einem benannten Wert (keinem Feld!) einen neuen Wert zu
+// Berücksichtigt korrektes Object-Slicing bei Klassenwerten:
+//
+// - Wenn LHS ein Klassenwert (kein Ref) ist
+// - und RHS ein Objekt ist
+// - und sich statischer Typ (LHS) und dynamischer Typ (RHS) unterscheiden,
+//   dann:
+//     * werden nur die Felder der statischen LHS-Klasse übernommen (Slicing)
+//     * dynamic_class wird auf die statische LHS-Klasse gesetzt
+//
+// In allen anderen Fällen erfolgt eine normale Zuweisung.
 inline void assign_value_slicing_aware(Env& env,
                                       const std::string& name,
                                       const Value& rhs,
                                       FunctionTable& functions) {
+    // Statischer Typ der linken Seite (Variable)
     ast::Type lhs_t = env.static_type_of(name);
 
+    // Nur relevant bei Klassenwerten, die KEINE Referenzen sind
     if (lhs_t.base == ast::Type::Base::Class && !lhs_t.is_ref) {
-        if (auto* rhs_obj = std::get_if<ObjectPtr>(&rhs)) {
-            if (!*rhs_obj) throw std::runtime_error("assignment from null object");
 
-            // read current lhs value
+        // RHS muss ein Objekt sein
+        if (auto* rhs_obj = std::get_if<ObjectPtr>(&rhs)) {
+            if (!*rhs_obj)
+                throw std::runtime_error("assignment from null object");
+
+            // Aktuellen Wert der LHS-Variable lesen
             Value cur = env.read_value(name);
             auto* lhs_obj = std::get_if<ObjectPtr>(&cur);
-            if (!lhs_obj || !*lhs_obj) throw std::runtime_error("assignment to non-object");
+            if (!lhs_obj || !*lhs_obj)
+                throw std::runtime_error("assignment to non-object");
 
-            // If types match exactly: deep-ish copy (field map + dynamic class)
-            // If types differ: slicing to lhs static type
+            // Statischer Typ der LHS-Variable
             const std::string lhs_static = lhs_t.class_name;
+            // Dynamischer Typ des RHS-Objekts
             const std::string rhs_dynamic = (*rhs_obj)->dynamic_class;
 
+            // Gleicher Typ: komplette Kopie (keine Slicing-Regel notwendig)
             if (lhs_static == rhs_dynamic) {
                 (*lhs_obj)->dynamic_class = rhs_dynamic;
                 (*lhs_obj)->fields = (*rhs_obj)->fields;
                 return;
             }
 
-            // slicing: keep only lhs_static merged fields
+            // Unterschiedliche Typen: Object-Slicing
+            // Nur Felder der statischen LHS-Klasse behalten
             const auto& lhs_ci = functions.class_rt.get(lhs_static);
 
-            (*lhs_obj)->fields = (*rhs_obj)->fields;        // copy all first
+            // Erst alles kopieren ...
+            (*lhs_obj)->fields = (*rhs_obj)->fields;
+            // ... dann auf statische LHS-Klasse zuschneiden
             (*lhs_obj)->slice_to(lhs_static, lhs_ci.merged_fields);
-            (*lhs_obj)->dynamic_class = lhs_static;          // now its a base object
+            // Dynamischen Typ auf statischen Typ setzen
+            (*lhs_obj)->dynamic_class = lhs_static;
             return;
         }
     }
 
-    // fallback: normal assignment
+    // Fallback: normale Zuweisung (keine Klassenwerte / Referenzen / Primitivtypen)
     env.assign_value(name, rhs);
 }
 

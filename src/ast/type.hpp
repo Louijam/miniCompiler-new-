@@ -1,42 +1,57 @@
 #pragma once
-#include <string>
+// Verhindert mehrfaches Einbinden dieser Header-Datei
+
+#include <string>   // std::string
 
 namespace ast {
 
+// Repräsentiert einen Typ im Sprach-Typsystem
 struct Type {
+
+    // Grundtypen der Sprache
     enum class Base {
-        Bool,
-        Int,
-        Char,
-        String,
-        Void,
-        Class
+        Bool,       // bool
+        Int,        // int
+        Char,       // char
+        String,     // string
+        Void,       // void
+        Class       // Klassentyp
     };
 
-    Base base = Base::Int;
-    bool is_ref = false;          // true -> T&
-    std::string class_name;       // only used if base == Class
+    Base base = Base::Int;        // Basistyp (Default: int)
+    bool is_ref = false;          // true => Referenztyp (T&)
+    std::string class_name;       // Name der Klasse (nur bei Base::Class relevant)
 
+    // Fabrikfunktionen fuer primitive Typen
     static Type Bool(bool ref=false)   { return Type{Base::Bool, ref, ""}; }
     static Type Int(bool ref=false)    { return Type{Base::Int, ref, ""}; }
     static Type Char(bool ref=false)   { return Type{Base::Char, ref, ""}; }
     static Type String(bool ref=false) { return Type{Base::String, ref, ""}; }
-    static Type Void()                { return Type{Base::Void, false, ""}; }
+    static Type Void()                 { return Type{Base::Void, false, ""}; }
 
+    // Fabrikfunktion fuer Klassentypen
     static Type Class(std::string name, bool ref=false) {
         Type t;
-        t.base = Base::Class;
-        t.is_ref = ref;
-        t.class_name = std::move(name);
+        t.base = Base::Class;          // Markiert als Klassentyp
+        t.is_ref = ref;                // Optional Referenz
+        t.class_name = std::move(name);// Klassenname
         return t;
     }
 
+    // Typvergleich (inkl. Referenz und Klassenname)
     bool operator==(const Type& other) const {
-        return base == other.base && is_ref == other.is_ref && class_name == other.class_name;
+        return base == other.base &&
+               is_ref == other.is_ref &&
+               class_name == other.class_name;
     }
-    bool operator!=(const Type& other) const { return !(*this == other); }
+
+    // Ungleichheitsoperator
+    bool operator!=(const Type& other) const {
+        return !(*this == other);
+    }
 };
 
+// Wandelt einen Typ in seine String-Repräsentation um
 inline std::string to_string(const Type& t) {
     std::string s;
     switch (t.base) {
@@ -47,15 +62,15 @@ inline std::string to_string(const Type& t) {
         case Type::Base::Void:   s = "void"; break;
         case Type::Base::Class:  s = t.class_name; break;
     }
-    if (t.is_ref) s += "&";
+    if (t.is_ref)
+        s += "&";                // Referenztyp kennzeichnen
     return s;
 }
 
-// helper: get non-ref version (for rules like "no ref to ref", assign, etc.)
+// Hilfsfunktion: entfernt Referenz-Flag (z.B. fuer Assignments oder Typregeln)
 inline Type strip_ref(Type t) {
     t.is_ref = false;
     return t;
 }
 
 } // namespace ast
-

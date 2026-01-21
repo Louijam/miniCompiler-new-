@@ -1,16 +1,19 @@
 #pragma once
+// Verhindert mehrfaches Einbinden dieser Header-Datei
 
-#include <string>
+#include <string> // std::string
 
 namespace lexer {
 
+// TokenKind: alle Token-Arten, die der Lexer erzeugen kann
 enum class TokenKind {
-    End,
+    End,            // Ende des Inputs
 
-    Identifier,
-    IntLit,
-    CharLit,
-    StringLit,
+    // Literale / Identifier
+    Identifier,     // Namen (Variablen, Funktionen, Klassen, ...)
+    IntLit,         // Integer-Literal
+    CharLit,        // Char-Literal (inkl. Quotes in lexeme)
+    StringLit,      // String-Literal (inkl. Quotes in lexeme)
 
     // Keywords
     KwInt,
@@ -57,16 +60,19 @@ enum class TokenKind {
     GreaterEq   // >=
 };
 
+// Konkretes Token: Art + Lexem + Position im Input
 struct Token {
-    TokenKind kind{TokenKind::End};
-    std::string lexeme{};
-    int line{1};
-    int col{1};
+    TokenKind kind{TokenKind::End}; // Token-Art
+    std::string lexeme{};           // Text im Quellcode (roh)
+    int line{1};                    // Zeile (1-based)
+    int col{1};                     // Spalte (1-based)
 };
 
+// Debug-Hilfsfunktion: wandelt TokenKind in einen String um
 inline const char* to_string(TokenKind k) {
     switch (k) {
         case TokenKind::End: return "End";
+
         case TokenKind::Identifier: return "Identifier";
         case TokenKind::IntLit: return "IntLit";
         case TokenKind::CharLit: return "CharLit";
@@ -116,4 +122,4 @@ inline const char* to_string(TokenKind k) {
     return "Unknown";
 }
 
-} 
+} // namespace lexer

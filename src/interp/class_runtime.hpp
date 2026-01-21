@@ -1,45 +1,60 @@
 #pragma once
-#include <string>
-#include <unordered_map>
-#include <vector>
-#include <stdexcept>
-#include <algorithm>
+// Verhindert mehrfaches Einbinden dieser Header-Datei
 
-#include "../ast/program.hpp"
-#include "../ast/type.hpp"
-#include "../ast/class.hpp"
-#include "../ast/function.hpp"
+#include <string>           // std::string
+#include <unordered_map>   // Hashmaps fuer schnelle Namensauflösung
+#include <vector>           // std::vector
+#include <stdexcept>        // std::runtime_error
+#include <algorithm>        // std::reverse
+
+#include "../ast/program.hpp"   // AST-Wurzel (Program)
+#include "../ast/type.hpp"      // Typrepräsentation
+#include "../ast/class.hpp"     // Klassendefinitionen
+#include "../ast/function.hpp"  // Funktionsdefinitionen
 
 namespace interp {
 
+// Metadaten zu einer Methode (zeigt direkt in den AST)
 struct MethodInfo {
-    const ast::MethodDef* def = nullptr; // points into Program (stable after build)
-    std::string owner_class;
-    bool is_virtual = false;
+    const ast::MethodDef* def = nullptr; // Pointer in den AST (nach build stabil)
+    std::string owner_class;             // Klasse, in der die Methode definiert ist
+    bool is_virtual = false;             // Virtual-Flag der Methode
 };
 
+// Metadaten zu einem Konstruktor
 struct CtorInfo {
-    const ast::ConstructorDef* def = nullptr; // points into Program (stable after build)
-    std::string owner_class;
+    const ast::ConstructorDef* def = nullptr; // Pointer in den AST
+    std::string owner_class;                  // Klasse, zu der der Konstruktor gehört
 };
 
+// Laufzeit-Informationen zu einer Klasse
 struct ClassInfo {
-    std::string name;
-    std::string base;
+    std::string name;                         // Klassenname
+    std::string base;                         // Basisklasse (leer => keine)
 
-    std::unordered_map<std::string, ast::Type> merged_fields; // derived wins
-    std::vector<CtorInfo> ctors;
+    // Alle sichtbaren Felder inkl. Vererbung (abgeleitete Felder überschreiben Basisfelder)
+    std::unordered_map<std::string, ast::Type> merged_fields;
 
+    std::vector<CtorInfo> ctors;              // Alle Konstruktoren der Klasse
+
+    // Methodenname -> Liste aller Overloads
     std::unordered_map<std::string, std::vector<MethodInfo>> methods;
+
+    // VTable: Signatur -> Klasse, die die Implementierung besitzt
     std::unordered_map<std::string, std::string> vtable_owner;
+
+    // VTable: Signatur -> ob Methode virtuell ist
     std::unordered_map<std::string, bool> vtable_virtual;
 };
 
+// Zentrale Runtime-Struktur fuer Klassen
 struct ClassRuntime {
-    std::unordered_map<std::string, ClassInfo> classes;
-    const ast::Program* prog = nullptr;
+    std::unordered_map<std::string, ClassInfo> classes; // Alle Klasseninfos
+    const ast::Program* prog = nullptr;                 // Referenz auf AST-Programm
 
-    static std::string sig_key(const std::string& mname, const std::vector<ast::Param>& params) {
+    // Erzeugt einen eindeutigen Schlüssel fuer Methoden-Signaturen
+    static std::string sig_key(const std::string& mname,
+                               const std::vector<ast::Param>& params) {
         std::string k = mname;
         k += "(";
         for (size_t i = 0; i < params.size(); ++i) {
@@ -50,7 +65,9 @@ struct ClassRuntime {
         return k;
     }
 
-    static std::string ctor_key(const std::string& cname, const std::vector<ast::Param>& params) {
+    // Erzeugt einen Schlüssel fuer Konstruktor-Signaturen
+    static std::string ctor_key(const std::string& cname,
+                                const std::vector<ast::Param>& params) {
         std::string k = cname;
         k += "(";
         for (size_t i = 0; i < params.size(); ++i) {
@@ -61,16 +78,20 @@ struct ClassRuntime {
         return k;
     }
 
+    // Sucht eine Klassendefinition im AST
     const ast::ClassDef* find_class_def(const std::string& name) const {
         if (!prog) return nullptr;
-        for (const auto& c : prog->classes) if (c.name == name) return &c;
+        for (const auto& c : prog->classes)
+            if (c.name == name) return &c;
         return nullptr;
     }
 
+    // Baut alle Runtime-Strukturen aus dem AST auf
     void build(const ast::Program& p) {
         prog = &p;
         classes.clear();
 
+        // Leere ClassInfo-Strukturen anlegen
         for (const auto& c : p.classes) {
             ClassInfo ci;
             ci.name = c.name;
@@ -78,25 +99,27 @@ struct ClassRuntime {
             classes.emplace(ci.name, std::move(ci));
         }
 
-        // merged fields (derived wins)
+        // Felder inkl. Vererbung zusammenführen (derived gewinnt)
         for (const auto& c : p.classes) {
             auto& ci = classes.at(c.name);
 
             std::unordered_map<std::string, ast::Type> merged;
             std::string cur = c.name;
+
             while (!cur.empty()) {
                 const ast::ClassDef* def = find_class_def(cur);
                 if (!def) break;
 
                 for (const auto& f : def->fields) {
-                    if (merged.find(f.name) == merged.end()) merged.emplace(f.name, f.type);
+                    if (merged.find(f.name) == merged.end())
+                        merged.emplace(f.name, f.type);
                 }
                 cur = def->base_name;
             }
             ci.merged_fields = std::move(merged);
         }
 
-        // ctors + methods
+        // Konstruktoren und Methoden sammeln
         for (const auto& c : p.classes) {
             auto& ci = classes.at(c.name);
 
@@ -117,10 +140,11 @@ struct ClassRuntime {
             }
         }
 
-        // vtable_owner / vtable_virtual
+        // Aufbau von VTable-Informationen
         for (const auto& c : p.classes) {
             auto& ci = classes.at(c.name);
 
+            // Vererbungskette (Base -> Derived)
             std::vector<const ast::ClassDef*> chain;
             const ast::ClassDef* cur = find_class_def(c.name);
             while (cur) {
@@ -133,14 +157,18 @@ struct ClassRuntime {
             std::unordered_map<std::string, bool> virt;
             std::unordered_map<std::string, std::string> owner;
 
+            // Virtual-Flags bestimmen
             for (const auto* d : chain) {
                 for (const auto& m : d->methods) {
                     std::string k = sig_key(m.name, m.params);
-                    if (virt.find(k) == virt.end()) virt[k] = m.is_virtual;
-                    else if (!virt[k] && m.is_virtual) virt[k] = true;
+                    if (virt.find(k) == virt.end())
+                        virt[k] = m.is_virtual;
+                    else if (!virt[k] && m.is_virtual)
+                        virt[k] = true;
                 }
             }
 
+            // Owner der Methoden bestimmen
             for (const auto* d : chain) {
                 for (const auto& m : d->methods) {
                     std::string k = sig_key(m.name, m.params);
@@ -154,21 +182,27 @@ struct ClassRuntime {
         }
     }
 
+    // Liefert Runtime-Infos einer Klasse oder wirft Fehler
     const ClassInfo& get(const std::string& name) const {
         auto it = classes.find(name);
-        if (it == classes.end()) throw std::runtime_error("runtime error: unknown class: " + name);
+        if (it == classes.end())
+            throw std::runtime_error("runtime error: unknown class: " + name);
         return it->second;
     }
 
-    static ast::Type base_type(ast::Type t) { t.is_ref = false; return t; }
+    // Entfernt Referenzinformation aus einem Typ
+    static ast::Type base_type(ast::Type t) {
+        t.is_ref = false;
+        return t;
+    }
 
-    // --- ctor overload resolution (only inside the same class) ---
+    // --- Konstruktor-Overload-Auflösung ---
     const ast::ConstructorDef& resolve_ctor(const std::string& class_name,
                                             const std::vector<ast::Type>& arg_types,
                                             const std::vector<bool>& arg_is_lvalue) const {
         const auto& ci = get(class_name);
 
-        // If no ctors exist (should not happen after sema), synth default empty.
+        // Falls keine Konstruktoren existieren: synthetischer Default
         if (ci.ctors.empty()) {
             static ast::ConstructorDef synth;
             return synth;
@@ -205,11 +239,12 @@ struct ClassRuntime {
             }
         }
 
-        if (!best) throw std::runtime_error("runtime error: no matching constructor: " + class_name);
+        if (!best)
+            throw std::runtime_error("runtime error: no matching constructor: " + class_name);
         return *best;
     }
 
-    // --- method resolution (unchanged) ---
+    // --- Methodenauflösung ---
     const ast::MethodDef& pick_overload_in_class(const std::string& cls,
                                                  const std::string& method,
                                                  const std::vector<ast::Type>& arg_types,
@@ -217,7 +252,8 @@ struct ClassRuntime {
         const auto& ci = get(cls);
 
         auto it = ci.methods.find(method);
-        if (it == ci.methods.end()) throw std::runtime_error("runtime error: no matching overload: " + method);
+        if (it == ci.methods.end())
+            throw std::runtime_error("runtime error: no matching overload: " + method);
 
         const ast::MethodDef* best = nullptr;
         int best_score = -1;
@@ -232,6 +268,7 @@ struct ClassRuntime {
             for (size_t i = 0; i < arg_types.size(); ++i) {
                 ast::Type at = base_type(arg_types[i]);
                 ast::Type pt = m.params[i].type;
+
                 if (base_type(pt) != at) { ok = false; break; }
                 if (pt.is_ref) {
                     if (!arg_is_lvalue[i]) { ok = false; break; }
@@ -249,10 +286,12 @@ struct ClassRuntime {
             }
         }
 
-        if (!best) throw std::runtime_error("runtime error: no matching overload: " + method);
+        if (!best)
+            throw std::runtime_error("runtime error: no matching overload: " + method);
         return *best;
     }
 
+    // Bestimmt die Klasse, aus der die Methode effektiv aufgerufen wird
     std::string resolve_owner(const std::string& static_class,
                               const std::string& dynamic_class,
                               const ast::MethodDef& picked_sig,
@@ -263,18 +302,25 @@ struct ClassRuntime {
         auto itv = st.vtable_virtual.find(key);
         bool virt = (itv != st.vtable_virtual.end()) ? itv->second : false;
 
+        // Nicht virtuell oder Aufruf nicht ueber Referenz
         if (!virt || !call_via_ref) {
             auto ito = st.vtable_owner.find(key);
-            if (ito == st.vtable_owner.end()) throw std::runtime_error("runtime error: unknown method: " + static_class + "." + picked_sig.name);
+            if (ito == st.vtable_owner.end())
+                throw std::runtime_error("runtime error: unknown method: " +
+                                         static_class + "." + picked_sig.name);
             return ito->second;
         }
 
+        // Virtueller Aufruf: dynamischer Typ entscheidet
         const auto& dyn = get(dynamic_class);
         auto ito = dyn.vtable_owner.find(key);
-        if (ito == dyn.vtable_owner.end()) throw std::runtime_error("runtime error: unknown method: " + dynamic_class + "." + picked_sig.name);
+        if (ito == dyn.vtable_owner.end())
+            throw std::runtime_error("runtime error: unknown method: " +
+                                     dynamic_class + "." + picked_sig.name);
         return ito->second;
     }
 
+    // Vollständige Methodenauflösung (Overload + Virtual Dispatch)
     const ast::MethodDef& resolve_method(const std::string& static_class,
                                          const std::string& dynamic_class,
                                          const std::string& method,
@@ -282,8 +328,9 @@ struct ClassRuntime {
                                          const std::vector<bool>& arg_is_lvalue,
                                          bool call_via_ref) const {
         std::string cur = static_class;
-
         std::vector<std::string> chain;
+
+        // Vererbungskette sammeln
         while (!cur.empty()) {
             chain.push_back(cur);
             const auto& ci = get(cur);
@@ -293,30 +340,39 @@ struct ClassRuntime {
 
         const ast::MethodDef* picked = nullptr;
 
+        // Overload in Kette suchen
         for (const auto& c : chain) {
             try {
-                const auto& m = pick_overload_in_class(c, method, arg_types, arg_is_lvalue);
-                picked = &m;
+                picked = &pick_overload_in_class(c, method, arg_types, arg_is_lvalue);
                 break;
             } catch (...) {
             }
         }
-        if (!picked) throw std::runtime_error("runtime error: no matching overload: " + method);
 
-        std::string owner = resolve_owner(static_class, dynamic_class, *picked, call_via_ref);
+        if (!picked)
+            throw std::runtime_error("runtime error: no matching overload: " + method);
+
+        // Effektiven Owner bestimmen
+        std::string owner = resolve_owner(static_class, dynamic_class,
+                                          *picked, call_via_ref);
 
         const auto& owner_ci = get(owner);
         auto it = owner_ci.methods.find(method);
-        if (it == owner_ci.methods.end()) throw std::runtime_error("runtime error: missing owner method: " + owner + "." + method);
+        if (it == owner_ci.methods.end())
+            throw std::runtime_error("runtime error: missing owner method: " +
+                                     owner + "." + method);
 
         std::string target_key = sig_key(picked->name, picked->params);
 
+        // Konkrete Implementierung finden
         for (const auto& mi : it->second) {
             const auto& m = *mi.def;
-            if (sig_key(m.name, m.params) == target_key) return m;
+            if (sig_key(m.name, m.params) == target_key)
+                return m;
         }
 
-        throw std::runtime_error("runtime error: missing override body: " + owner + "." + method);
+        throw std::runtime_error("runtime error: missing override body: " +
+                                 owner + "." + method);
     }
 };
 
