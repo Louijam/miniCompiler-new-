@@ -56,11 +56,10 @@ private:
     size_t i_ = 0;
 
 private:
-    // ---------- token helpers ----------
     static std::unordered_set<std::string> prescan_class_names(const std::vector<lexer::Token>& toks) {
         std::unordered_set<std::string> cn;
         for (size_t k = 0; k + 1 < toks.size(); ++k) {
-            if (toks[k].lexeme == "class") {
+            if (toks[k].lexeme == "class" && toks[k + 1].kind == lexer::TokenKind::Identifier) {
                 cn.insert(toks[k + 1].lexeme);
             }
         }
@@ -111,7 +110,6 @@ private:
         return ParseError("ParseError at " + std::to_string(t.line) + ":" + std::to_string(t.col) + ": " + msg);
     }
 
-    // ---------- types ----------
     ast::Type parse_type() {
         ast::Type t;
 
@@ -149,7 +147,6 @@ private:
         return ps;
     }
 
-    // ---------- program-level ----------
     ast::FunctionDef parse_function_def() {
         ast::FunctionDef f;
         f.return_type = parse_type();
@@ -160,7 +157,6 @@ private:
         return f;
     }
 
-    // Minimal class parse (enough to not crash if class exists)
     ast::ClassDef parse_class_def() {
         expect_lex("class", "expected 'class'");
         ast::ClassDef c;
@@ -175,26 +171,23 @@ private:
 
         expect_lex("{", "expected '{' in class body");
 
-        // optional "public:"
         if (match_lex("public")) expect_lex(":", "expected ':' after 'public'");
 
-        // Skip members for now (consume tokens until '}')
-        while (!match_lex("}")) {
-            if (is_end()) throw err_here("unexpected end in class body");
-            ++i_;
+        // For now: accept class bodies syntactically by skipping tokens until matching '}'
+        // Next step (optional): parse fields/methods/ctors using ast/class.hpp details.
+        int depth = 1;
+        while (!is_end() && depth > 0) {
+            if (match_lex("{")) depth++;
+            else if (match_lex("}")) depth--;
+            else ++i_;
         }
 
-        // optional ';'
         match_lex(";");
         return c;
     }
 
-    // ---------- statements ----------
     ast::StmtPtr parse_stmt() {
-        if (match_lex("{")) {
-            --i_; // let parse_block consume '{'
-            return parse_block_stmt();
-        }
+        if (peek_lex("{")) return parse_block_stmt();
 
         if (match_lex("return")) {
             auto r = std::make_unique<ast::ReturnStmt>();
@@ -205,8 +198,6 @@ private:
             return r;
         }
 
-        // variable declaration: Type ident (= expr)? ;
-        // Heuristic: if next token is a type keyword OR identifier that is a known class name
         if (peek_lex("int") || peek_lex("bool") || peek_lex("char") || peek_lex("string") || peek_lex("void") ||
             (peek_is_ident() && class_names_.count(peek().lexeme))) {
 
@@ -224,7 +215,6 @@ private:
             return s;
         }
 
-        // expression statement
         auto es = std::make_unique<ast::ExprStmt>();
         es->expr = parse_expr();
         expect_lex(";", "expected ';' after expression");
@@ -241,20 +231,32 @@ private:
         return b;
     }
 
-    // ---------- expressions (precedence) ----------
     ast::ExprPtr parse_expr() { return parse_assignment(); }
 
     ast::ExprPtr parse_assignment() {
         auto e = parse_logical_or();
+
         if (match_lex("=")) {
-            // Only support simple name = expr for now
-            auto* ve = dynamic_cast<ast::VarExpr*>(e.get());
-            if (!ve) throw err_here("left side of assignment must be a variable");
-            auto a = std::make_unique<ast::AssignExpr>();
-            a->name = ve->name;
-            a->value = parse_assignment();
-            return a;
+            auto rhs = parse_assignment();
+
+            if (auto* ve = dynamic_cast<ast::VarExpr*>(e.get())) {
+                auto a = std::make_unique<ast::AssignExpr>();
+                a->name = ve->name;
+                a->value = std::move(rhs);
+                return a;
+            }
+
+            if (auto* me = dynamic_cast<ast::MemberAccessExpr*>(e.get())) {
+                auto fa = std::make_unique<ast::FieldAssignExpr>();
+                fa->object = std::move(me->object);
+                fa->field = me->field;
+                fa->value = std::move(rhs);
+                return fa;
+            }
+
+            throw err_here("left side of assignment must be a variable or field");
         }
+
         return e;
     }
 
@@ -388,7 +390,6 @@ private:
             return u;
         }
         if (match_lex("+")) {
-            // unary plus: no-op
             return parse_unary();
         }
         if (match_lex("-")) {
@@ -397,7 +398,45 @@ private:
             u->expr = parse_unary();
             return u;
         }
-        return parse_primary();
+        return parse_postfix();
+    }
+
+    ast::ExprPtr parse_postfix() {
+        auto e = parse_primary();
+
+        for (;;) {
+            if (match_lex(".")) {
+                std::string field = take_ident("expected field/method name after '.'");
+
+                if (match_lex("(")) {
+                    auto mc = std::make_unique<ast::MethodCallExpr>();
+                    mc->object = std::move(e);
+                    mc->method = std::move(field);
+
+                    if (!match_lex(")")) {
+                        for (;;) {
+                            mc->args.push_back(parse_expr());
+                            if (match_lex(")")) break;
+                            expect_lex(",", "expected ',' or ')'");
+                        }
+                    }
+                    e = std::move(mc);
+                    continue;
+                } else {
+                    auto ma = std::make_unique<ast::MemberAccessExpr>();
+                    ma->object = std::move(e);
+                    ma->field = std::move(field);
+                    e = std::move(ma);
+                    continue;
+                }
+            }
+
+            // Support chained call on expression: e(args) is not in AST right now (only CallExpr by name),
+            // so we do not parse that form.
+            break;
+        }
+
+        return e;
     }
 
     ast::ExprPtr parse_primary() {
@@ -407,36 +446,46 @@ private:
             return e;
         }
 
-        // literals / identifiers
         if (!is_end() && peek().kind == lexer::TokenKind::IntLit) {
             int v = std::stoi(peek().lexeme);
             ++i_;
             return std::make_unique<ast::IntLiteral>(v);
         }
+
         if (!is_end() && peek().kind == lexer::TokenKind::StringLit) {
             std::string s = peek().lexeme;
             ++i_;
             return std::make_unique<ast::StringLiteral>(std::move(s));
         }
+
         if (match_lex("true"))  return std::make_unique<ast::BoolLiteral>(true);
         if (match_lex("false")) return std::make_unique<ast::BoolLiteral>(false);
 
         if (peek_is_ident()) {
             std::string name = take_ident("expected identifier");
 
-            // call: name(...)
+            // Call or construct: Name(args)
             if (match_lex("(")) {
-                auto call = std::make_unique<ast::CallExpr>();
-                call->callee = name;
-
+                std::vector<ast::ExprPtr> args;
                 if (!match_lex(")")) {
                     for (;;) {
-                        call->args.push_back(parse_expr());
+                        args.push_back(parse_expr());
                         if (match_lex(")")) break;
                         expect_lex(",", "expected ',' or ')'");
                     }
                 }
-                return call;
+
+                if (class_names_.count(name)) {
+                    auto c = std::make_unique<ast::ConstructExpr>();
+                    c->class_name = std::move(name);
+                    c->args = std::move(args);
+                    return c;
+                } else {
+                    auto call = std::make_unique<ast::CallExpr>();
+                    call->callee = std::move(name);
+                    call->args = std::move(args);
+                    return call;
+                }
             }
 
             return std::make_unique<ast::VarExpr>(std::move(name));
