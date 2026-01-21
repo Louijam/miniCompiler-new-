@@ -76,11 +76,13 @@ inline Value default_value_for_type(const ast::Type& t, FunctionTable& functions
 
 inline void exec_stmt(Env& env, const ast::Stmt& s, FunctionTable& functions);
 
-inline void bind_fields_as_refs(Env& method_env,
-                                const ObjectPtr& self,
-                                const std::string& static_class,
-                                FunctionTable& functions) {
-    const auto& ci = functions.class_rt.get(static_class);
+// IMPORTANT FIX:
+// In method execution we must expose fields of the *dynamic* object,
+// otherwise C::foo() called through B& can't see cval.
+inline void bind_fields_as_refs_dynamic(Env& method_env,
+                                        const ObjectPtr& self,
+                                        FunctionTable& functions) {
+    const auto& ci = functions.class_rt.get(self->dynamic_class);
     for (const auto& kv : ci.merged_fields) {
         ast::Type rt = kv.second;
         rt.is_ref = true;
@@ -122,7 +124,6 @@ inline Value call_builtin(const std::string& name, const std::vector<Value>& arg
     }
     if (name == "print_bool") {
         bool b = expect_bool(args.at(0), "print_bool");
-        // GOLD tests wollen 0/1
         std::cout << (b ? 1 : 0) << "\n";
         return Value{0};
     }
@@ -172,9 +173,12 @@ inline Value call_method(Env& caller_env,
                          const std::vector<Value>& arg_vals,
                          const std::vector<LValue>& arg_lvals,
                          FunctionTable& functions) {
+    (void)static_class;
+
     Env method_env(&caller_env);
 
-    bind_fields_as_refs(method_env, self, static_class, functions);
+    // FIX HERE: bind dynamic fields, not static fields
+    bind_fields_as_refs_dynamic(method_env, self, functions);
 
     for (size_t i = 0; i < m.params.size(); ++i) {
         const auto& p = m.params[i];
@@ -200,9 +204,12 @@ inline void call_ctor(Env& caller_env,
                       const std::vector<Value>& arg_vals,
                       const std::vector<LValue>& arg_lvals,
                       FunctionTable& functions) {
+    (void)ctor_class;
+
     Env ctor_env(&caller_env);
 
-    bind_fields_as_refs(ctor_env, self, ctor_class, functions);
+    // For simplicity: expose dynamic fields as refs (safe; base ctors won't reference derived-only names anyway)
+    bind_fields_as_refs_dynamic(ctor_env, self, functions);
 
     for (size_t i = 0; i < ctor.params.size(); ++i) {
         const auto& p = ctor.params[i];
@@ -478,7 +485,6 @@ inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions) {
         Value lv = eval_expr(env, *bin->left, functions);
         Value rv = eval_expr(env, *bin->right, functions);
 
-        // arithmetic int
         if (bin->op == BinaryExpr::Op::Add) return expect_int(lv, "+") + expect_int(rv, "+");
         if (bin->op == BinaryExpr::Op::Sub) return expect_int(lv, "-") - expect_int(rv, "-");
         if (bin->op == BinaryExpr::Op::Mul) return expect_int(lv, "*") * expect_int(rv, "*");
@@ -493,7 +499,6 @@ inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions) {
             return expect_int(lv, "%") % r;
         }
 
-        // relational (< <= > >=) for int/char
         if (bin->op == BinaryExpr::Op::Lt || bin->op == BinaryExpr::Op::Le ||
             bin->op == BinaryExpr::Op::Gt || bin->op == BinaryExpr::Op::Ge) {
 
@@ -514,7 +519,6 @@ inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions) {
             throw std::runtime_error("type error: relational expects int or char");
         }
 
-        // equality (== !=) for bool/int/char/string
         if (bin->op == BinaryExpr::Op::Eq || bin->op == BinaryExpr::Op::Ne) {
             bool eq = false;
 
