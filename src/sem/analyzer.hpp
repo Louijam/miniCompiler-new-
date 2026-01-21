@@ -19,312 +19,331 @@ struct Analyzer {
 
     void set_class_table(const ClassTable* t) { ct = t; }
 
-    static bool is_lvalue(const ast::Expr& e) {
-        return dynamic_cast<const ast::VarExpr*>(&e) != nullptr
-            || dynamic_cast<const ast::MemberAccessExpr*>(&e) != nullptr;
-    }
-
     static ast::Type base_type(ast::Type t) {
         t.is_ref = false;
         return t;
     }
 
     static std::string type_name(const ast::Type& t) {
-        return ast::to_string(t);
-    }
-
-    static bool is_bool_context_allowed(const ast::Type& t) {
-        auto b = base_type(t);
-        return b == ast::Type::Bool() || b == ast::Type::Int() || b == ast::Type::Char() || b == ast::Type::String();
-    }
-
-    std::string class_name_of(const ast::Type& t) const {
-        auto b = base_type(t);
-        if (b.base != ast::Type::Base::Class) {
-            throw std::runtime_error("semantic error: expected class type, got " + type_name(t));
+        using B = ast::Type::Base;
+        std::string s;
+        switch (t.base) {
+            case B::Bool:   s = "bool"; break;
+            case B::Int:    s = "int"; break;
+            case B::Char:   s = "char"; break;
+            case B::String: s = "string"; break;
+            case B::Void:   s = "void"; break;
+            case B::Class:  s = t.class_name; break;
         }
-        return b.class_name;
+        if (t.is_ref) s += "&";
+        return s;
     }
 
-    bool class_compatible_for_copy(const ast::Type& dst, const ast::Type& src) const {
-        if (base_type(dst).base != ast::Type::Base::Class) return false;
-        if (base_type(src).base != ast::Type::Base::Class) return false;
-        if (!ct) throw std::runtime_error("semantic error: internal: class table not set");
-        std::string d = base_type(dst).class_name;
-        std::string s = base_type(src).class_name;
-        return ct->is_same_or_derived(s, d); // src derived -> dst base allowed (slicing)
-    }
-
-    bool ref_compatible_for_bind(const ast::Type& dst_ref, const ast::Type& src, const ast::Expr& init_expr) const {
-        if (!dst_ref.is_ref) return false;
-        if (!is_lvalue(init_expr)) return false;
-
-        ast::Type D = base_type(dst_ref);
-        ast::Type S = base_type(src);
-
-        if (D == S) return true;
-
-        if (D.base == ast::Type::Base::Class && S.base == ast::Type::Base::Class) {
-            if (!ct) throw std::runtime_error("semantic error: internal: class table not set");
-            return ct->is_same_or_derived(S.class_name, D.class_name);
-        }
-
+    bool is_lvalue(const ast::Expr& e) const {
+        if (dynamic_cast<const ast::VarExpr*>(&e)) return true;
+        if (dynamic_cast<const ast::MemberAccessExpr*>(&e)) return true;
         return false;
     }
 
-    // ---------- overload resolution (functions) ----------
-    const FuncSymbol& resolve_call(const Scope& scope, const ast::CallExpr& call) const {
-        const Scope* s = &scope;
-        const std::vector<FuncSymbol>* overloads = nullptr;
-        while (s) {
-            auto it = s->funcs.find(call.callee);
-            if (it != s->funcs.end()) { overloads = &it->second; break; }
-            s = s->parent;
-        }
-        if (!overloads) throw std::runtime_error("semantic error: unknown function: " + call.callee);
-
-        const FuncSymbol* best = nullptr;
-        int best_score = -1;
-
-        for (const auto& cand : *overloads) {
-            if (cand.param_types.size() != call.args.size()) continue;
-
-            bool ok = true;
-            int score = 0;
-
-            for (size_t i = 0; i < call.args.size(); ++i) {
-                ast::Type arg_t = base_type(type_of_expr(scope, *call.args[i]));
-                ast::Type par_t = cand.param_types[i];
-
-                if (base_type(par_t) != arg_t) { ok = false; break; }
-
-                if (par_t.is_ref) {
-                    if (!is_lvalue(*call.args[i])) { ok = false; break; }
-                    score += 1;
-                }
-            }
-
-            if (!ok) continue;
-
-            if (score > best_score) {
-                best_score = score;
-                best = &cand;
-            } else if (score == best_score) {
-                throw std::runtime_error("semantic error: ambiguous overload: " + call.callee);
-            }
-        }
-
-        if (!best) throw std::runtime_error("semantic error: no matching overload: " + call.callee);
-        return *best;
+    bool is_bool_context_allowed(const ast::Type& t) const {
+        using B = ast::Type::Base;
+        if (t.is_ref) return false;
+        return t.base == B::Bool || t.base == B::Int || t.base == B::Char || t.base == B::String;
     }
 
-    // ---------- expressions ----------
+    bool can_bind_ref_to_expr(const ast::Type& dst_ref, const ast::Expr& init_expr, const Scope& scope) const {
+        if (!dst_ref.is_ref) return false;
+        ast::Type src = type_of_expr(scope, init_expr);
+        if (base_type(src) != base_type(dst_ref)) return false;
+        return is_lvalue(init_expr);
+    }
+
     ast::Type type_of_expr(const Scope& scope, const ast::Expr& e) const {
         using namespace ast;
 
-        if (dynamic_cast<const IntLiteral*>(&e)) return Type::Int();
-        if (dynamic_cast<const BoolLiteral*>(&e)) return Type::Bool();
-        if (dynamic_cast<const CharLiteral*>(&e)) return Type::Char();
-        if (dynamic_cast<const StringLiteral*>(&e)) return Type::String();
+        if (auto* b = dynamic_cast<const BoolLitExpr*>(&e)) return Type::Bool();
+        if (auto* i = dynamic_cast<const IntLitExpr*>(&e)) return Type::Int();
+        if (auto* c = dynamic_cast<const CharLitExpr*>(&e)) return Type::Char();
+        if (auto* s = dynamic_cast<const StringLitExpr*>(&e)) return Type::String();
 
         if (auto* v = dynamic_cast<const VarExpr*>(&e)) {
-            return scope.lookup_var(v->name).type;
-        }
-
-        if (auto* a = dynamic_cast<const AssignExpr*>(&e)) {
-            const auto& lhs = scope.lookup_var(a->name);
-            ast::Type rhs_t = type_of_expr(scope, *a->value);
-
-            if (base_type(lhs.type) != base_type(rhs_t)) {
-                if (!class_compatible_for_copy(lhs.type, rhs_t)) {
-                    throw std::runtime_error("semantic error: assignment type mismatch: " +
-                        lhs.name + " is " + type_name(lhs.type) + ", rhs is " + type_name(rhs_t));
-                }
-            }
-            return rhs_t;
-        }
-
-        if (auto* fa = dynamic_cast<const FieldAssignExpr*>(&e)) {
-            if (!ct) throw std::runtime_error("semantic error: internal: class table not set");
-
-            // in unserem Subset: obj muss lvalue sein (kein Feldschreiben auf temporaeren Objekten)
-            if (!is_lvalue(*fa->object)) {
-                throw std::runtime_error("semantic error: field assignment requires lvalue object");
-            }
-
-            ast::Type obj_t = type_of_expr(scope, *fa->object);
-            std::string cn = class_name_of(obj_t);
-
-            if (!ct->has_field_in_chain(cn, fa->field)) {
-                throw std::runtime_error("semantic error: unknown field: " + cn + "." + fa->field);
-            }
-
-            ast::Type field_t = ct->field_type_in_chain(cn, fa->field);
-            ast::Type rhs_t = type_of_expr(scope, *fa->value);
-
-            if (base_type(field_t) != base_type(rhs_t)) {
-                if (!class_compatible_for_copy(field_t, rhs_t)) {
-                    throw std::runtime_error("semantic error: field assignment type mismatch: " +
-                        cn + "." + fa->field + " is " + type_name(field_t) + ", rhs is " + type_name(rhs_t));
-                }
-            }
-
-            return rhs_t; // assignment expression result type = rhs
-        }
-
-        if (auto* ce = dynamic_cast<const ConstructExpr*>(&e)) {
-            if (!ct) throw std::runtime_error("semantic error: internal: class table not set");
-            if (!ct->has_class(ce->class_name)) {
-                throw std::runtime_error("semantic error: unknown class: " + ce->class_name);
-            }
-
-            std::vector<ast::Type> arg_base;
-            std::vector<bool> arg_lv;
-            arg_base.reserve(ce->args.size());
-            arg_lv.reserve(ce->args.size());
-
-            for (const auto& a2 : ce->args) {
-                arg_base.push_back(base_type(type_of_expr(scope, *a2)));
-                arg_lv.push_back(is_lvalue(*a2));
-            }
-
-            (void)ct->resolve_ctor_call(ce->class_name, arg_base, arg_lv);
-            return Type::Class(ce->class_name);
-        }
-
-        if (auto* m = dynamic_cast<const MemberAccessExpr*>(&e)) {
-            if (!ct) throw std::runtime_error("semantic error: internal: class table not set");
-            ast::Type obj_t = type_of_expr(scope, *m->object);
-            std::string cn = class_name_of(obj_t);
-
-            if (!ct->has_field_in_chain(cn, m->field)) {
-                throw std::runtime_error("semantic error: unknown field: " + cn + "." + m->field);
-            }
-            return ct->field_type_in_chain(cn, m->field);
-        }
-
-        if (auto* mc = dynamic_cast<const MethodCallExpr*>(&e)) {
-            if (!ct) throw std::runtime_error("semantic error: internal: class table not set");
-            ast::Type obj_t = type_of_expr(scope, *mc->object);
-            std::string cn = class_name_of(obj_t);
-
-            std::vector<ast::Type> arg_base;
-            std::vector<bool> arg_lv;
-            arg_base.reserve(mc->args.size());
-            arg_lv.reserve(mc->args.size());
-
-            for (const auto& a2 : mc->args) {
-                arg_base.push_back(base_type(type_of_expr(scope, *a2)));
-                arg_lv.push_back(is_lvalue(*a2));
-            }
-
-            const auto& chosen = ct->resolve_method_call(cn, mc->method, arg_base, arg_lv);
-            return chosen.return_type;
+            if (!scope.has_var(v->name))
+                throw std::runtime_error("semantic error: unknown variable: " + v->name);
+            return scope.lookup_var(v->name);
         }
 
         if (auto* u = dynamic_cast<const UnaryExpr*>(&e)) {
-            ast::Type t = type_of_expr(scope, *u->expr);
-
-            if (u->op == UnaryExpr::Op::Neg) {
-                if (base_type(t) != Type::Int()) throw std::runtime_error("semantic error: unary - expects int");
-                return Type::Int();
-            }
-            if (u->op == UnaryExpr::Op::Not) {
+            ast::Type t = type_of_expr(scope, *u->rhs);
+            if (u->op == "!") {
                 if (base_type(t) != Type::Bool()) throw std::runtime_error("semantic error: ! expects bool");
                 return Type::Bool();
             }
-            throw std::runtime_error("semantic error: unknown unary op");
+            if (u->op == "+" || u->op == "-") {
+                if (base_type(t) != Type::Int()) throw std::runtime_error("semantic error: unary +/- expects int");
+                return Type::Int();
+            }
+            throw std::runtime_error("semantic error: unknown unary operator: " + u->op);
         }
 
-        if (auto* bin = dynamic_cast<const BinaryExpr*>(&e)) {
-            ast::Type lt = type_of_expr(scope, *bin->left);
-            ast::Type rt = type_of_expr(scope, *bin->right);
+        if (auto* b = dynamic_cast<const BinaryExpr*>(&e)) {
+            ast::Type lt = type_of_expr(scope, *b->lhs);
+            ast::Type rt = type_of_expr(scope, *b->rhs);
 
-            auto L = base_type(lt);
-            auto R = base_type(rt);
+            if (b->op == "&&" || b->op == "||") {
+                if (base_type(lt) != Type::Bool() || base_type(rt) != Type::Bool())
+                    throw std::runtime_error("semantic error: &&/|| expects bool operands");
+                return Type::Bool();
+            }
 
-            if (bin->op == BinaryExpr::Op::Add || bin->op == BinaryExpr::Op::Sub ||
-                bin->op == BinaryExpr::Op::Mul || bin->op == BinaryExpr::Op::Div ||
-                bin->op == BinaryExpr::Op::Mod) {
-                if (L != Type::Int() || R != Type::Int())
-                    throw std::runtime_error("semantic error: arithmetic expects int,int");
+            if (b->op == "==" || b->op == "!=") {
+                if (base_type(lt) != base_type(rt))
+                    throw std::runtime_error("semantic error: ==/!= expects same operand types");
+                if (base_type(lt) == Type::Bool() || base_type(lt) == Type::String() ||
+                    base_type(lt) == Type::Int() || base_type(lt) == Type::Char()) {
+                    return Type::Bool();
+                }
+                throw std::runtime_error("semantic error: ==/!= not supported for this type");
+            }
+
+            if (b->op == "<" || b->op == "<=" || b->op == ">" || b->op == ">=") {
+                if (base_type(lt) != base_type(rt))
+                    throw std::runtime_error("semantic error: relational op expects same operand types");
+                if (base_type(lt) == Type::Int() || base_type(lt) == Type::Char())
+                    return Type::Bool();
+                throw std::runtime_error("semantic error: relational op not supported for this type");
+            }
+
+            if (b->op == "+" || b->op == "-" || b->op == "*" || b->op == "/" || b->op == "%") {
+                if (base_type(lt) != Type::Int() || base_type(rt) != Type::Int())
+                    throw std::runtime_error("semantic error: arithmetic expects int operands");
                 return Type::Int();
             }
 
-            if (bin->op == BinaryExpr::Op::AndAnd || bin->op == BinaryExpr::Op::OrOr) {
-                if (L != Type::Bool() || R != Type::Bool())
-                    throw std::runtime_error("semantic error: &&/|| expects bool,bool");
-                return Type::Bool();
-            }
-
-            if (bin->op == BinaryExpr::Op::Eq || bin->op == BinaryExpr::Op::Ne) {
-                if (L != R) throw std::runtime_error("semantic error: ==/!= require same type");
-                if (L != Type::Int() && L != Type::Char() && L != Type::Bool() && L != Type::String())
-                    throw std::runtime_error("semantic error: ==/!= unsupported type");
-                return Type::Bool();
-            }
-
-            if (bin->op == BinaryExpr::Op::Lt || bin->op == BinaryExpr::Op::Le ||
-                bin->op == BinaryExpr::Op::Gt || bin->op == BinaryExpr::Op::Ge) {
-                if (L != R) throw std::runtime_error("semantic error: relational ops require same type");
-                if (L != Type::Int() && L != Type::Char())
-                    throw std::runtime_error("semantic error: relational ops require int or char");
-                return Type::Bool();
-            }
-
-            throw std::runtime_error("semantic error: unknown binary op");
+            throw std::runtime_error("semantic error: unknown binary operator: " + b->op);
         }
 
-        if (auto* call = dynamic_cast<const ast::CallExpr*>(&e)) {
-            const FuncSymbol& f = resolve_call(scope, *call);
-            return f.return_type;
+        if (auto* a = dynamic_cast<const AssignExpr*>(&e)) {
+            if (!is_lvalue(*a->lhs))
+                throw std::runtime_error("semantic error: left side of assignment is not an lvalue");
+
+            ast::Type lt = type_of_expr(scope, *a->lhs);
+            ast::Type rt = type_of_expr(scope, *a->rhs);
+
+            if (lt.is_ref) {
+                if (base_type(lt) != base_type(rt))
+                    throw std::runtime_error("semantic error: assignment type mismatch");
+                return base_type(rt);
+            }
+
+            if (base_type(lt) != base_type(rt)) {
+                if (lt.base == ast::Type::Base::Class && rt.base == ast::Type::Base::Class) {
+                    if (!ct) throw std::runtime_error("semantic error: class table not set");
+                    if (!ct->is_base_of(lt.class_name, rt.class_name))
+                        throw std::runtime_error("semantic error: assignment type mismatch");
+                    return base_type(lt);
+                }
+                throw std::runtime_error("semantic error: assignment type mismatch");
+            }
+
+            return base_type(rt);
+        }
+
+        if (auto* fa = dynamic_cast<const FieldAssignExpr*>(&e)) {
+            ast::Type objt = type_of_expr(scope, *fa->obj);
+            if (base_type(objt).base != ast::Type::Base::Class)
+                throw std::runtime_error("semantic error: field assignment on non-class object");
+
+            if (!ct) throw std::runtime_error("semantic error: class table not set");
+            ast::Type ft = ct->field_type_in_chain(base_type(objt).class_name, fa->field);
+
+            ast::Type rt = type_of_expr(scope, *fa->rhs);
+
+            if (ft.is_ref) {
+                if (base_type(ft) != base_type(rt))
+                    throw std::runtime_error("semantic error: assignment type mismatch");
+                return base_type(rt);
+            }
+
+            if (base_type(ft) != base_type(rt)) {
+                if (ft.base == ast::Type::Base::Class && rt.base == ast::Type::Base::Class) {
+                    if (!ct->is_base_of(ft.class_name, rt.class_name))
+                        throw std::runtime_error("semantic error: assignment type mismatch");
+                    return base_type(ft);
+                }
+                throw std::runtime_error("semantic error: assignment type mismatch");
+            }
+
+            return base_type(rt);
+        }
+
+        if (auto* call = dynamic_cast<const CallExpr*>(&e)) {
+            if (!scope.has_func(call->callee))
+                throw std::runtime_error("semantic error: unknown function: " + call->callee);
+
+            const auto& overloads = scope.lookup_funcs(call->callee);
+
+            int best_score = -1;
+            const FuncSymbol* best = nullptr;
+
+            for (const auto& cand : overloads) {
+                if (cand.param_types.size() != call->args.size()) continue;
+
+                bool ok = true;
+                int score = 0;
+                for (size_t i = 0; i < call->args.size(); ++i) {
+                    ast::Type at = type_of_expr(scope, *call->args[i]);
+                    ast::Type pt = cand.param_types[i];
+
+                    if (pt.is_ref) {
+                        if (!can_bind_ref_to_expr(pt, *call->args[i], scope)) { ok = false; break; }
+                        score += 2;
+                    } else {
+                        if (base_type(at) != base_type(pt)) { ok = false; break; }
+                        score += 1;
+                    }
+                }
+
+                if (!ok) continue;
+
+                if (score > best_score) {
+                    best_score = score;
+                    best = &cand;
+                } else if (score == best_score) {
+                    throw std::runtime_error("semantic error: ambiguous overload for function: " + call->callee);
+                }
+            }
+
+            if (!best) throw std::runtime_error("semantic error: no matching overload for function: " + call->callee);
+            return best->return_type;
+        }
+
+        if (auto* ce = dynamic_cast<const ConstructExpr*>(&e)) {
+            if (!ct) throw std::runtime_error("semantic error: class table not set");
+            if (!ct->has_class(ce->class_name))
+                throw std::runtime_error("semantic error: unknown class: " + ce->class_name);
+
+            const auto& overloads = ct->constructors_of(ce->class_name);
+
+            int best_score = -1;
+            const ConstructorSymbol* best = nullptr;
+
+            for (const auto& cand : overloads) {
+                if (cand.param_types.size() != ce->args.size()) continue;
+
+                bool ok = true;
+                int score = 0;
+                for (size_t i = 0; i < ce->args.size(); ++i) {
+                    ast::Type at = type_of_expr(scope, *ce->args[i]);
+                    ast::Type pt = cand.param_types[i];
+
+                    if (pt.is_ref) {
+                        if (!can_bind_ref_to_expr(pt, *ce->args[i], scope)) { ok = false; break; }
+                        score += 2;
+                    } else {
+                        if (base_type(at) != base_type(pt)) { ok = false; break; }
+                        score += 1;
+                    }
+                }
+
+                if (!ok) continue;
+
+                if (score > best_score) {
+                    best_score = score;
+                    best = &cand;
+                } else if (score == best_score) {
+                    throw std::runtime_error("semantic error: ambiguous overload for constructor: " + ce->class_name);
+                }
+            }
+
+            if (!best) throw std::runtime_error("semantic error: no matching overload for constructor: " + ce->class_name);
+            return ast::Type::Class(ce->class_name);
+        }
+
+        if (auto* ma = dynamic_cast<const MemberAccessExpr*>(&e)) {
+            ast::Type objt = type_of_expr(scope, *ma->obj);
+            if (base_type(objt).base != ast::Type::Base::Class)
+                throw std::runtime_error("semantic error: member access on non-class object");
+
+            if (!ct) throw std::runtime_error("semantic error: class table not set");
+            return ct->field_type_in_chain(base_type(objt).class_name, ma->member);
+        }
+
+        if (auto* mc = dynamic_cast<const MethodCallExpr*>(&e)) {
+            ast::Type objt = type_of_expr(scope, *mc->obj);
+            if (base_type(objt).base != ast::Type::Base::Class)
+                throw std::runtime_error("semantic error: method call on non-class object");
+
+            if (!ct) throw std::runtime_error("semantic error: class table not set");
+
+            const auto& overloads = ct->methods_of_in_chain(base_type(objt).class_name, mc->method);
+
+            int best_score = -1;
+            const MethodSymbol* best = nullptr;
+
+            for (const auto& cand : overloads) {
+                if (cand.param_types.size() != mc->args.size()) continue;
+
+                bool ok = true;
+                int score = 0;
+                for (size_t i = 0; i < mc->args.size(); ++i) {
+                    ast::Type at = type_of_expr(scope, *mc->args[i]);
+                    ast::Type pt = cand.param_types[i];
+
+                    if (pt.is_ref) {
+                        if (!can_bind_ref_to_expr(pt, *mc->args[i], scope)) { ok = false; break; }
+                        score += 2;
+                    } else {
+                        if (base_type(at) != base_type(pt)) { ok = false; break; }
+                        score += 1;
+                    }
+                }
+
+                if (!ok) continue;
+
+                if (score > best_score) {
+                    best_score = score;
+                    best = &cand;
+                } else if (score == best_score) {
+                    throw std::runtime_error("semantic error: ambiguous overload for method: " + mc->method);
+                }
+            }
+
+            if (!best) throw std::runtime_error("semantic error: no matching overload for method: " + mc->method);
+            return best->return_type;
         }
 
         throw std::runtime_error("semantic error: unknown expression node");
     }
 
-    // ---------- statements ----------
     void check_stmt(Scope& scope, const ast::Stmt& s, const ast::Type& expected_return) const {
         using namespace ast;
 
         if (auto* b = dynamic_cast<const BlockStmt*>(&s)) {
             Scope inner(&scope);
-            for (const auto& st : b->statements) check_stmt(inner, *st, expected_return);
+            for (const auto& st : b->stmts) check_stmt(inner, *st, expected_return);
             return;
         }
 
         if (auto* v = dynamic_cast<const VarDeclStmt*>(&s)) {
             if (scope.has_var_local(v->name))
-                throw std::runtime_error("semantic error: variable redefinition in same scope: " + v->name);
+                throw std::runtime_error("semantic error: duplicate variable in scope: " + v->name);
 
-            ast::Type declared = v->decl_type;
-
-            if (declared.is_ref) {
-                if (!v->init)
-                    throw std::runtime_error("semantic error: reference variable requires initializer: " + v->name);
-                ast::Type init_t = type_of_expr(scope, *v->init);
-
-                if (!ref_compatible_for_bind(declared, init_t, *v->init)) {
-                    throw std::runtime_error("semantic error: init type mismatch for " + v->name +
-                        ": declared " + type_name(declared) + ", init " + type_name(init_t));
-                }
-
-                scope.define_var(v->name, declared);
-                return;
-            }
+            if (v->type.is_ref && !v->init)
+                throw std::runtime_error("semantic error: reference variable must be initialized: " + v->name);
 
             if (v->init) {
-                ast::Type init_t = type_of_expr(scope, *v->init);
-
-                if (base_type(declared) != base_type(init_t)) {
-                    if (!class_compatible_for_copy(declared, init_t)) {
-                        throw std::runtime_error("semantic error: init type mismatch for " + v->name +
-                            ": declared " + type_name(declared) + ", init " + type_name(init_t));
+                if (v->type.is_ref) {
+                    if (!can_bind_ref_to_expr(v->type, *v->init, scope))
+                        throw std::runtime_error("semantic error: cannot bind reference to rvalue: " + v->name);
+                } else {
+                    ast::Type it = type_of_expr(scope, *v->init);
+                    if (base_type(it) != base_type(v->type)) {
+                        throw std::runtime_error("semantic error: initializer type mismatch for variable: " + v->name);
                     }
                 }
             }
 
-            scope.define_var(v->name, declared);
+            scope.define_var(v->name, v->type);
             return;
         }
 
@@ -384,8 +403,9 @@ struct Analyzer {
                       const std::string& class_name,
                       const ast::MethodDef& m) const {
         Scope member_scope(const_cast<Scope*>(&global));
-        auto merged = ctab.merged_fields_derived_wins(class_name);
-        for (const auto& kv : merged) member_scope.define_var(kv.first, kv.second);
+
+        const auto& fields = ctab.merged_fields_for(class_name);
+        for (const auto& f : fields) member_scope.define_var(f.name, f.type);
 
         Scope method_scope(&member_scope);
 
@@ -399,6 +419,29 @@ struct Analyzer {
         }
 
         check_stmt(method_scope, *m.body, m.return_type);
+    }
+
+    void check_constructor(const Scope& global,
+                           const ClassTable& ctab,
+                           const std::string& class_name,
+                           const ast::ConstructorDef& ctor) const {
+        Scope member_scope(const_cast<Scope*>(&global));
+
+        const auto& fields = ctab.merged_fields_for(class_name);
+        for (const auto& f : fields) member_scope.define_var(f.name, f.type);
+
+        Scope ctor_scope(&member_scope);
+
+        for (const auto& p : ctor.params) {
+            if (ctab.has_field_in_chain(class_name, p.name)) {
+                throw std::runtime_error("semantic error: parameter shadows field in constructor: " + p.name);
+            }
+            if (ctor_scope.has_var_local(p.name))
+                throw std::runtime_error("semantic error: duplicate parameter name: " + p.name);
+            ctor_scope.define_var(p.name, p.type);
+        }
+
+        check_stmt(ctor_scope, *ctor.body, ast::Type::Void());
     }
 };
 

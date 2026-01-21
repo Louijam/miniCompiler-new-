@@ -14,34 +14,29 @@ struct ProgramAnalyzer {
     Analyzer analyzer;
 
     static void check_main_signature(const Scope& global) {
+        if (!global.has_func("main")) return;
+
+        const auto& ovs = global.lookup_funcs("main");
         bool ok = false;
-
-        auto it = global.funcs.find("main");
-        if (it == global.funcs.end()) return;
-
-        for (const auto& f : it->second) {
+        for (const auto& f : ovs) {
             if (!f.param_types.empty()) continue;
-            auto rt = Analyzer::base_type(f.return_type);
-            if (rt == ast::Type::Int() || rt == ast::Type::Void()) ok = true;
+            if (f.return_type == ast::Type::Int() || f.return_type == ast::Type::Void()) {
+                ok = true;
+                break;
+            }
         }
-
-        if (!ok) {
-            throw std::runtime_error("semantic error: invalid main signature (allowed: int main() or void main())");
-        }
+        if (!ok) throw std::runtime_error("semantic error: invalid main signature");
     }
 
     void analyze(const ast::Program& p) {
-        Scope global;
         ClassTable ct;
+        ct.build(p);
 
-        for (const auto& c : p.classes) ct.add_class_name(c.name);
-        for (const auto& c : p.classes) ct.fill_class_members(c);
-        ct.check_inheritance();
+        Scope global(nullptr);
 
-        // now propagates virtual-ness to overrides
-        ct.check_overrides_and_virtuals();
-
-        analyzer.set_class_table(&ct);
+        for (const auto& c : p.classes) {
+            global.define_class(c.name);
+        }
 
         for (const auto& f : p.functions) {
             FuncSymbol sym;
@@ -54,9 +49,12 @@ struct ProgramAnalyzer {
 
         check_main_signature(global);
 
+        analyzer.set_class_table(&ct);
+
         for (const auto& f : p.functions) analyzer.check_function(global, f);
 
         for (const auto& c : p.classes) {
+            for (const auto& ctor : c.ctors) analyzer.check_constructor(global, ct, c.name, ctor);
             for (const auto& m : c.methods) analyzer.check_method(global, ct, c.name, m);
         }
     }
