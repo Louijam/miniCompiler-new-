@@ -1,3 +1,5 @@
+#include "tools/dump_tokens.hpp"
+
 #include <iostream>
 #include <string>
 #include <vector>
@@ -151,7 +153,9 @@ static int run_selftest_ctorchain() {
 }
 
 int main(int argc, char** argv) {
-    try {
+if (mini_cpp::maybe_dump_tokens(argc, argv)) return 0;
+    
+try {
         if (argc > 1) {
             std::string arg = argv[1];
             if (arg == "--selftest-dispatch") return run_selftest_dispatch();

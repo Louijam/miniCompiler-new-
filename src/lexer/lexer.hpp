@@ -6,7 +6,7 @@
 #include <string_view>
 #include <vector>
 
-#include "lexer/token.hpp"
+#include "token.hpp"
 
 namespace lexer {
 
@@ -83,14 +83,41 @@ private:
         }
     }
 
-    Token make(TokenKind k, std::string lex) {
-        return Token{k, lex, line_, col_};
+    Token make_at(TokenKind k, std::string lex, int start_line, int start_col) {
+        return Token{k, std::move(lex), start_line, start_col};
+    }
+
+    [[noreturn]] void lex_error(int at_line, int at_col, const std::string& msg) {
+        throw std::runtime_error("Lexer error at " + std::to_string(at_line) + ":" +
+                                 std::to_string(at_col) + ": " + msg);
+    }
+
+    // Reads one escape sequence after backslash and returns the escaped char.
+    // Supports minimal C++-like escapes needed for this project.
+    char read_escape(int start_line, int start_col) {
+        if (eof()) lex_error(start_line, start_col, "unfinished escape sequence");
+        char e = get();
+        switch (e) {
+            case 'n': return '\n';
+            case 't': return '\t';
+            case 'r': return '\r';
+            case '0': return '\0';
+            case '\\': return '\\';
+            case '\'': return '\'';
+            case '"': return '"';
+            default:
+                lex_error(start_line, start_col, std::string("unknown escape \\") + e);
+        }
+        return '\0';
     }
 
     Token next_token() {
         skip_ws_and_comments();
 
-        if (eof()) return make(TokenKind::End, "");
+        int start_line = line_;
+        int start_col  = col_;
+
+        if (eof()) return make_at(TokenKind::End, "", start_line, start_col);
 
         char c = peek();
 
@@ -100,22 +127,22 @@ private:
             while (std::isalnum((unsigned char)peek()) || peek() == '_')
                 s.push_back(get());
 
-            if (s == "int") return make(TokenKind::KwInt, s);
-            if (s == "bool") return make(TokenKind::KwBool, s);
-            if (s == "char") return make(TokenKind::KwChar, s);
-            if (s == "string") return make(TokenKind::KwString, s);
-            if (s == "void") return make(TokenKind::KwVoid, s);
-            if (s == "true") return make(TokenKind::KwTrue, s);
-            if (s == "false") return make(TokenKind::KwFalse, s);
-            if (s == "if") return make(TokenKind::KwIf, s);
-            if (s == "else") return make(TokenKind::KwElse, s);
-            if (s == "while") return make(TokenKind::KwWhile, s);
-            if (s == "return") return make(TokenKind::KwReturn, s);
-            if (s == "class") return make(TokenKind::KwClass, s);
-            if (s == "public") return make(TokenKind::KwPublic, s);
-            if (s == "virtual") return make(TokenKind::KwVirtual, s);
+            if (s == "int") return make_at(TokenKind::KwInt, s, start_line, start_col);
+            if (s == "bool") return make_at(TokenKind::KwBool, s, start_line, start_col);
+            if (s == "char") return make_at(TokenKind::KwChar, s, start_line, start_col);
+            if (s == "string") return make_at(TokenKind::KwString, s, start_line, start_col);
+            if (s == "void") return make_at(TokenKind::KwVoid, s, start_line, start_col);
+            if (s == "true") return make_at(TokenKind::KwTrue, s, start_line, start_col);
+            if (s == "false") return make_at(TokenKind::KwFalse, s, start_line, start_col);
+            if (s == "if") return make_at(TokenKind::KwIf, s, start_line, start_col);
+            if (s == "else") return make_at(TokenKind::KwElse, s, start_line, start_col);
+            if (s == "while") return make_at(TokenKind::KwWhile, s, start_line, start_col);
+            if (s == "return") return make_at(TokenKind::KwReturn, s, start_line, start_col);
+            if (s == "class") return make_at(TokenKind::KwClass, s, start_line, start_col);
+            if (s == "public") return make_at(TokenKind::KwPublic, s, start_line, start_col);
+            if (s == "virtual") return make_at(TokenKind::KwVirtual, s, start_line, start_col);
 
-            return make(TokenKind::Identifier, s);
+            return make_at(TokenKind::Identifier, s, start_line, start_col);
         }
 
         // numbers
@@ -123,40 +150,108 @@ private:
             std::string s;
             while (std::isdigit((unsigned char)peek()))
                 s.push_back(get());
-            return make(TokenKind::IntLit, s);
+            return make_at(TokenKind::IntLit, s, start_line, start_col);
+        }
+
+        // char literal: 'a' or '\0' etc.
+        if (c == '\'') {
+            std::string raw;
+            raw.push_back(get()); // opening '
+
+            if (eof()) lex_error(start_line, start_col, "unfinished char literal");
+
+            char ch = get();
+            raw.push_back(ch);
+
+            if (ch == '\\') {
+                // escape
+                char esc = read_escape(start_line, start_col);
+                // keep raw representation: we already added backslash, add the escape char as typed
+                // (read_escape consumed it)
+                raw.push_back((esc == '\n') ? 'n' :
+                              (esc == '\t') ? 't' :
+                              (esc == '\r') ? 'r' :
+                              (esc == '\0') ? '0' :
+                              (esc == '\\') ? '\\' :
+                              (esc == '\'') ? '\'' :
+                              (esc == '"') ? '"' : '?');
+            }
+
+            if (eof()) lex_error(start_line, start_col, "unfinished char literal");
+
+            char endq = get();
+            raw.push_back(endq);
+
+            if (endq != '\'') lex_error(start_line, start_col, "char literal must end with '");
+            return make_at(TokenKind::CharLit, raw, start_line, start_col);
+        }
+
+        // string literal: "foo", supports escapes like "\n", "\0", "\\", "\""
+        if (c == '"') {
+            std::string raw;
+            raw.push_back(get()); // opening "
+
+            while (true) {
+                if (eof()) lex_error(start_line, start_col, "unfinished string literal");
+
+                char ch = get();
+                raw.push_back(ch);
+
+                if (ch == '"') break; // end
+
+                if (ch == '\n') lex_error(start_line, start_col, "newline in string literal");
+
+                if (ch == '\\') {
+                    // escape (consume one more)
+                    if (eof()) lex_error(start_line, start_col, "unfinished escape in string literal");
+                    char esc_char = get();
+                    raw.push_back(esc_char);
+
+                    // validate escape
+                    switch (esc_char) {
+                        case 'n': case 't': case 'r': case '0':
+                        case '\\': case '"': case '\'':
+                            break;
+                        default:
+                            lex_error(start_line, start_col, std::string("unknown escape \\") + esc_char);
+                    }
+                }
+            }
+
+            return make_at(TokenKind::StringLit, raw, start_line, start_col);
         }
 
         // two-char operators
-        if (c == '&' && peek(1) == '&') { get(); get(); return make(TokenKind::AndAnd, "&&"); }
-        if (c == '|' && peek(1) == '|') { get(); get(); return make(TokenKind::OrOr, "||"); }
-        if (c == '=' && peek(1) == '=') { get(); get(); return make(TokenKind::EqEq, "=="); }
-        if (c == '!' && peek(1) == '=') { get(); get(); return make(TokenKind::NotEq, "!="); }
-        if (c == '<' && peek(1) == '=') { get(); get(); return make(TokenKind::LessEq, "<="); }
-        if (c == '>' && peek(1) == '=') { get(); get(); return make(TokenKind::GreaterEq, ">="); }
+        if (c == '&' && peek(1) == '&') { get(); get(); return make_at(TokenKind::AndAnd, "&&", start_line, start_col); }
+        if (c == '|' && peek(1) == '|') { get(); get(); return make_at(TokenKind::OrOr, "||", start_line, start_col); }
+        if (c == '=' && peek(1) == '=') { get(); get(); return make_at(TokenKind::EqEq, "==", start_line, start_col); }
+        if (c == '!' && peek(1) == '=') { get(); get(); return make_at(TokenKind::NotEq, "!=", start_line, start_col); }
+        if (c == '<' && peek(1) == '=') { get(); get(); return make_at(TokenKind::LessEq, "<=", start_line, start_col); }
+        if (c == '>' && peek(1) == '=') { get(); get(); return make_at(TokenKind::GreaterEq, ">=", start_line, start_col); }
 
         // single-char
         get();
         switch (c) {
-            case '(': return make(TokenKind::LParen, "(");
-            case ')': return make(TokenKind::RParen, ")");
-            case '{': return make(TokenKind::LBrace, "{");
-            case '}': return make(TokenKind::RBrace, "}");
-            case ';': return make(TokenKind::Semicolon, ";");
-            case ',': return make(TokenKind::Comma, ",");
-            case '.': return make(TokenKind::Dot, ".");
-            case ':': return make(TokenKind::Colon, ":");
-            case '&': return make(TokenKind::Amp, "&");
-            case '=': return make(TokenKind::Assign, "=");
-            case '+': return make(TokenKind::Plus, "+");
-            case '-': return make(TokenKind::Minus, "-");
-            case '*': return make(TokenKind::Star, "*");
-            case '/': return make(TokenKind::Slash, "/");
-            case '%': return make(TokenKind::Percent, "%");
-            case '!': return make(TokenKind::Bang, "!");
-            case '<': return make(TokenKind::Less, "<");
-            case '>': return make(TokenKind::Greater, ">");
+            case '(': return make_at(TokenKind::LParen, "(", start_line, start_col);
+            case ')': return make_at(TokenKind::RParen, ")", start_line, start_col);
+            case '{': return make_at(TokenKind::LBrace, "{", start_line, start_col);
+            case '}': return make_at(TokenKind::RBrace, "}", start_line, start_col);
+            case ';': return make_at(TokenKind::Semicolon, ";", start_line, start_col);
+            case ',': return make_at(TokenKind::Comma, ",", start_line, start_col);
+            case '.': return make_at(TokenKind::Dot, ".", start_line, start_col);
+            case ':': return make_at(TokenKind::Colon, ":", start_line, start_col);
+            case '&': return make_at(TokenKind::Amp, "&", start_line, start_col);
+            case '=': return make_at(TokenKind::Assign, "=", start_line, start_col);
+            case '+': return make_at(TokenKind::Plus, "+", start_line, start_col);
+            case '-': return make_at(TokenKind::Minus, "-", start_line, start_col);
+            case '*': return make_at(TokenKind::Star, "*", start_line, start_col);
+            case '/': return make_at(TokenKind::Slash, "/", start_line, start_col);
+            case '%': return make_at(TokenKind::Percent, "%", start_line, start_col);
+            case '!': return make_at(TokenKind::Bang, "!", start_line, start_col);
+            case '<': return make_at(TokenKind::Less, "<", start_line, start_col);
+            case '>': return make_at(TokenKind::Greater, ">", start_line, start_col);
             default:
-                throw std::runtime_error("Lexer error: unknown character");
+                lex_error(start_line, start_col, std::string("unknown character '") + c + "'");
         }
     }
 };
