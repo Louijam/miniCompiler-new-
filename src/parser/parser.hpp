@@ -103,6 +103,56 @@ private:
         return ParseError("ParseError at " + std::to_string(t.line) + ":" + std::to_string(t.col) + ": " + msg);
     }
 
+    // ---------- literal decoding (lexer keeps raw text with quotes/escapes) ----------
+    static char remember_escape(char esc) {
+        switch (esc) {
+            case 'n': return '\n';
+            case 't': return '\t';
+            case 'r': return '\r';
+            case '0': return '\0';
+            case '\\': return '\\';
+            case '\'': return '\'';
+            case '"': return '"';
+            default: throw std::runtime_error(std::string("unknown escape \\") + esc);
+        }
+    }
+
+    static char decode_char_lit(const std::string& raw) {
+        // raw form: 'a' or '\n' etc.
+        if (raw.size() < 3 || raw.front() != '\'' || raw.back() != '\'')
+            throw std::runtime_error("invalid char literal: " + raw);
+
+        if (raw[1] == '\\') {
+            if (raw.size() != 4) throw std::runtime_error("invalid escaped char literal: " + raw);
+            return remember_escape(raw[2]);
+        }
+
+        if (raw.size() != 3) throw std::runtime_error("invalid char literal: " + raw);
+        return raw[1];
+    }
+
+    static std::string decode_string_lit(const std::string& raw) {
+        // raw form: "..." including escapes
+        if (raw.size() < 2 || raw.front() != '"' || raw.back() != '"')
+            throw std::runtime_error("invalid string literal: " + raw);
+
+        std::string out;
+        out.reserve(raw.size());
+
+        for (size_t i = 1; i + 1 < raw.size(); ++i) {
+            char ch = raw[i];
+            if (ch != '\\') {
+                out.push_back(ch);
+                continue;
+            }
+            // escape
+            if (i + 1 >= raw.size() - 1) throw std::runtime_error("unfinished escape in string literal");
+            char esc = raw[++i];
+            out.push_back(remember_escape(esc));
+        }
+        return out;
+    }
+
     // ---------- types ----------
     ast::Type parse_type() {
         ast::Type t;
@@ -199,16 +249,16 @@ private:
                 m.body = parse_block_stmt();
                 c.methods.push_back(std::move(m));
             } else {
-                ast::FieldDecl f;
-                f.type = t;
-                f.name = member_name;
+                ast::FieldDecl fld;
+                fld.type = t;
+                fld.name = member_name;
 
                 if (match_lex("=")) {
-                    (void)parse_expr(); // consume initializer
+                    (void)parse_expr(); // consume initializer (currently ignored)
                 }
 
                 expect_lex(";", "expected ';' after field");
-                c.fields.push_back(std::move(f));
+                c.fields.push_back(std::move(fld));
             }
         }
 
@@ -219,6 +269,27 @@ private:
     // ---------- statements ----------
     ast::StmtPtr parse_stmt() {
         if (peek_lex("{")) return parse_block_stmt();
+
+        if (match_lex("if")) {
+            auto s = std::make_unique<ast::IfStmt>();
+            expect_lex("(", "expected '(' after if");
+            s->cond = parse_expr();
+            expect_lex(")", "expected ')' after if condition");
+            s->then_branch = parse_stmt();
+            if (match_lex("else")) {
+                s->else_branch = parse_stmt();
+            }
+            return s;
+        }
+
+        if (match_lex("while")) {
+            auto s = std::make_unique<ast::WhileStmt>();
+            expect_lex("(", "expected '(' after while");
+            s->cond = parse_expr();
+            expect_lex(")", "expected ')' after while condition");
+            s->body = parse_stmt();
+            return s;
+        }
 
         if (match_lex("return")) {
             auto r = std::make_unique<ast::ReturnStmt>();
@@ -485,9 +556,15 @@ private:
         }
 
         if (!is_end() && peek().kind == lexer::TokenKind::StringLit) {
-            std::string s = peek().lexeme;
+            std::string s = decode_string_lit(peek().lexeme);
             ++i_;
             return std::make_unique<ast::StringLiteral>(std::move(s));
+        }
+
+        if (!is_end() && peek().kind == lexer::TokenKind::CharLit) {
+            char c = decode_char_lit(peek().lexeme);
+            ++i_;
+            return std::make_unique<ast::CharLiteral>(c);
         }
 
         if (match_lex("true"))  return std::make_unique<ast::BoolLiteral>(true);
