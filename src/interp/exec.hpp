@@ -107,10 +107,7 @@ inline Value default_value_for_type(const ast::Type& t, FunctionTable& functions
     if (t.base == Base::Char) return Value{char('\0')};
     if (t.base == Base::String) return Value{std::string("")};
     if (t.base == Base::Class) {
-        // default construction executes ctor chain
         auto obj = allocate_object_with_default_fields(t.class_name, functions);
-        // run full default ctor chain (base -> ... -> this)
-        // implemented below
         (void)obj;
         return Value{obj};
     }
@@ -125,7 +122,8 @@ inline Value call_builtin(const std::string& name, const std::vector<Value>& arg
     }
     if (name == "print_bool") {
         bool b = expect_bool(args.at(0), "print_bool");
-        std::cout << (b ? "true" : "false") << "\n";
+        // GOLD tests wollen 0/1
+        std::cout << (b ? 1 : 0) << "\n";
         return Value{0};
     }
     if (name == "print_char") {
@@ -204,7 +202,6 @@ inline void call_ctor(Env& caller_env,
                       FunctionTable& functions) {
     Env ctor_env(&caller_env);
 
-    // C++: in ctor body, you can access fields unqualified (no this in our language)
     bind_fields_as_refs(ctor_env, self, ctor_class, functions);
 
     for (size_t i = 0; i < ctor.params.size(); ++i) {
@@ -221,7 +218,7 @@ inline void call_ctor(Env& caller_env,
     try {
         exec_stmt(ctor_env, *ctor.body, functions);
     } catch (const ReturnSignal&) {
-        // constructors should not return a value; ignore if it happens
+        // ignore
     }
 }
 
@@ -235,7 +232,6 @@ inline void run_default_ctor_chain(Env& caller_env,
         run_default_ctor_chain(caller_env, self, ci.base, functions);
     }
 
-    // Call class_name() if defined, else empty
     std::vector<Value> args;
     std::vector<LValue> lvs;
     std::vector<ast::Type> tys;
@@ -263,10 +259,8 @@ inline Value construct_object(Env& caller_env,
                               FunctionTable& functions) {
     ObjectPtr self = allocate_object_with_default_fields(class_name, functions);
 
-    // C++: derived construction implicitly calls base default ctor first
     run_base_default_only(caller_env, self, class_name, functions);
 
-    // then run selected ctor of this class
     const auto& ctor = functions.class_rt.resolve_ctor(class_name, arg_types, arg_is_lvalue);
     call_ctor(caller_env, self, class_name, ctor, arg_vals, arg_lvals, functions);
 
@@ -293,9 +287,7 @@ inline void exec_stmt(Env& env, const ast::Stmt& s, FunctionTable& functions) {
             Value init;
             if (v->init) init = eval_expr(env, *v->init, functions);
             else {
-                // default init like spec (also for class types)
                 if (t.base == ast::Type::Base::Class) {
-                    // full default ctor chain for T x;
                     auto obj = allocate_object_with_default_fields(t.class_name, functions);
                     run_default_ctor_chain(env, obj, t.class_name, functions);
                     init = Value{obj};
@@ -486,6 +478,7 @@ inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions) {
         Value lv = eval_expr(env, *bin->left, functions);
         Value rv = eval_expr(env, *bin->right, functions);
 
+        // arithmetic int
         if (bin->op == BinaryExpr::Op::Add) return expect_int(lv, "+") + expect_int(rv, "+");
         if (bin->op == BinaryExpr::Op::Sub) return expect_int(lv, "-") - expect_int(rv, "-");
         if (bin->op == BinaryExpr::Op::Mul) return expect_int(lv, "*") * expect_int(rv, "*");
@@ -498,6 +491,47 @@ inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions) {
             int r = expect_int(rv, "%");
             if (r == 0) throw std::runtime_error("Modulo durch 0");
             return expect_int(lv, "%") % r;
+        }
+
+        // relational (< <= > >=) for int/char
+        if (bin->op == BinaryExpr::Op::Lt || bin->op == BinaryExpr::Op::Le ||
+            bin->op == BinaryExpr::Op::Gt || bin->op == BinaryExpr::Op::Ge) {
+
+            if (std::holds_alternative<int>(lv) && std::holds_alternative<int>(rv)) {
+                int a = std::get<int>(lv), b = std::get<int>(rv);
+                if (bin->op == BinaryExpr::Op::Lt) return a < b;
+                if (bin->op == BinaryExpr::Op::Le) return a <= b;
+                if (bin->op == BinaryExpr::Op::Gt) return a > b;
+                return a >= b;
+            }
+            if (std::holds_alternative<char>(lv) && std::holds_alternative<char>(rv)) {
+                char a = std::get<char>(lv), b = std::get<char>(rv);
+                if (bin->op == BinaryExpr::Op::Lt) return a < b;
+                if (bin->op == BinaryExpr::Op::Le) return a <= b;
+                if (bin->op == BinaryExpr::Op::Gt) return a > b;
+                return a >= b;
+            }
+            throw std::runtime_error("type error: relational expects int or char");
+        }
+
+        // equality (== !=) for bool/int/char/string
+        if (bin->op == BinaryExpr::Op::Eq || bin->op == BinaryExpr::Op::Ne) {
+            bool eq = false;
+
+            if (std::holds_alternative<int>(lv) && std::holds_alternative<int>(rv)) {
+                eq = std::get<int>(lv) == std::get<int>(rv);
+            } else if (std::holds_alternative<bool>(lv) && std::holds_alternative<bool>(rv)) {
+                eq = std::get<bool>(lv) == std::get<bool>(rv);
+            } else if (std::holds_alternative<char>(lv) && std::holds_alternative<char>(rv)) {
+                eq = std::get<char>(lv) == std::get<char>(rv);
+            } else if (std::holds_alternative<std::string>(lv) && std::holds_alternative<std::string>(rv)) {
+                eq = std::get<std::string>(lv) == std::get<std::string>(rv);
+            } else {
+                throw std::runtime_error("type error: ==/!= expects same primitive type");
+            }
+
+            if (bin->op == BinaryExpr::Op::Eq) return eq;
+            return !eq;
         }
     }
 
