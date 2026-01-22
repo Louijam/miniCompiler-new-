@@ -39,3 +39,12 @@ cd mini_cpp
 rm -rf build
 cmake -S . -B build -G Ninja
 cmake --build build
+
+### Build-Starten
+
+./build/mini_cpp
+
+### Test-Starten
+
+./build/mini_cpp tests/neg/file.cpp
+./build/mini_cpp tests/pos/file.cpp
