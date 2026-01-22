@@ -7,6 +7,7 @@
 
 #include "env.hpp"         // Laufzeit-Umgebung / Scopes
 #include "functions.hpp"   // Funktions- und Klassen-Runtime
+#include "assign.hpp"      // slicing-aware assignment
 #include "lvalue.hpp"      // LValue (Variable oder Feld)
 #include "object.hpp"      // Objekt-Repräsentation
 #include "value.hpp"       // Laufzeitwerte
@@ -18,6 +19,7 @@ namespace interp {
 
 // Signal zum Abbrechen der Ausführung bei return
 struct ReturnSignal {
+    bool has_value = false; // true wenn "return expr;" genutzt wurde
     Value value;           // Rückgabewert
 };
 
@@ -57,6 +59,59 @@ inline ast::Type type_of_value(const Value& v) {
 
 // Vorwärtsdeklaration: Ausdrucksauswertung
 inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions);
+
+// Vorwärtsdeklarationen (werden weiter unten definiert)
+inline void exec_stmt(Env& env, const ast::Stmt& s, FunctionTable& functions);
+inline void bind_fields_as_refs_dynamic(Env& method_env,
+                                        const ObjectPtr& self,
+                                        FunctionTable& functions);
+
+// Ruft einen Konstruktor-Body auf (Felder als Referenzen gebunden)
+inline void run_ctor_body(Env& caller_env,
+                          const ObjectPtr& self,
+                          const ast::ConstructorDef& ctor,
+                          const std::vector<Value>& arg_vals,
+                          const std::vector<LValue>& arg_lvals,
+                          FunctionTable& functions) {
+    Env ctor_env(&caller_env);
+    bind_fields_as_refs_dynamic(ctor_env, self, functions);
+
+    for (size_t i = 0; i < ctor.params.size(); ++i) {
+        const auto& p = ctor.params[i];
+        if (p.type.is_ref)
+            ctor_env.define_ref(p.name, arg_lvals[i], p.type);
+        else
+            ctor_env.define_value(p.name, arg_vals[i], p.type);
+    }
+
+    // synthetischer Default-CTOR hat leeren Body
+    if (ctor.body) {
+        exec_stmt(ctor_env, *ctor.body, functions);
+    }
+}
+
+// Konstruktoraufruf: erst Base()-Default, dann eigener Body
+inline void run_ctor_chain(Env& caller_env,
+                           const ObjectPtr& self,
+                           const std::string& class_name,
+                           const ast::ConstructorDef& ctor,
+                           const std::vector<Value>& arg_vals,
+                           const std::vector<LValue>& arg_lvals,
+                           FunctionTable& functions) {
+    const auto& ci = functions.class_rt.get(class_name);
+
+    if (!ci.base.empty()) {
+        // Base(): immer parameterloser Default-CTOR
+        std::vector<ast::Type> empty_t;
+        std::vector<bool> empty_lv;
+        const ast::ConstructorDef& base_ctor = functions.class_rt.resolve_ctor(ci.base, empty_t, empty_lv);
+        std::vector<Value> empty_vals;
+        std::vector<LValue> empty_lvals;
+        run_ctor_chain(caller_env, self, ci.base, base_ctor, empty_vals, empty_lvals, functions);
+    }
+
+    run_ctor_body(caller_env, self, ctor, arg_vals, arg_lvals, functions);
+}
 
 // Wertet einen Ausdruck als LValue aus
 inline LValue eval_lvalue(Env& env, const ast::Expr& e, FunctionTable& functions) {
@@ -129,6 +184,27 @@ inline Value default_value_for_type(const ast::Type& t, FunctionTable& functions
     return Value{0};
 }
 
+// Kopiert einen Klassenwert als echten Wert (deep copy + ggf. slicing)
+inline Value copy_class_value_for_static_type(const Value& v,
+                                              const ast::Type& static_t,
+                                              FunctionTable& functions) {
+    if (static_t.base != ast::Type::Base::Class || static_t.is_ref) return v;
+
+    auto* src = std::get_if<ObjectPtr>(&v);
+    if (!src || !*src) throw std::runtime_error("expected object value");
+
+    Value copied = deep_copy_value(v);
+    auto* objp = std::get_if<ObjectPtr>(&copied);
+    if (!objp || !*objp) throw std::runtime_error("copy failed");
+
+    if ((*objp)->dynamic_class != static_t.class_name) {
+        const auto& ci = functions.class_rt.get(static_t.class_name);
+        (*objp)->slice_to(static_t.class_name, ci.merged_fields);
+        (*objp)->dynamic_class = static_t.class_name;
+    }
+    return copied;
+}
+
 // Builtin-Funktionen (print_*)
 inline Value call_builtin(const std::string& name, const std::vector<Value>& args) {
     if (name == "print_int") {
@@ -175,9 +251,18 @@ inline Value call_function(Env& caller_env,
     try {
         exec_stmt(callee, *f.body, functions);
     } catch (const ReturnSignal& rs) {
+        if (f.return_type.base == ast::Type::Base::Void) {
+            if (rs.has_value)
+                throw std::runtime_error("type error: void function must not return a value");
+            return Value{0};
+        }
+        if (!rs.has_value)
+            throw std::runtime_error("type error: non-void function must return a value");
         return rs.value;
     }
-    return Value{0};
+    // Kein expliziter return
+    if (f.return_type.base == ast::Type::Base::Void) return Value{0};
+    return default_value_for_type(f.return_type, functions);
 }
 
 // Aufruf einer Methode
@@ -207,9 +292,17 @@ inline Value call_method(Env& caller_env,
     try {
         exec_stmt(method_env, *m.body, functions);
     } catch (const ReturnSignal& rs) {
+        if (m.return_type.base == ast::Type::Base::Void) {
+            if (rs.has_value)
+                throw std::runtime_error("type error: void method must not return a value");
+            return Value{0};
+        }
+        if (!rs.has_value)
+            throw std::runtime_error("type error: non-void method must return a value");
         return rs.value;
     }
-    return Value{0};
+    if (m.return_type.base == ast::Type::Base::Void) return Value{0};
+    return default_value_for_type(m.return_type, functions);
 }
 
 // Ausführung eines Statements
@@ -239,6 +332,11 @@ inline void exec_stmt(Env& env, const ast::Stmt& s, FunctionTable& functions) {
                 init = eval_expr(env, *v->init, functions);
             else
                 init = default_value_for_type(t, functions);
+
+            // Klassenwerte sind Werte: deep copy + ggf. slicing zum statischen Typ
+            if (t.base == ast::Type::Base::Class)
+                init = copy_class_value_for_static_type(init, t, functions);
+
             env.define_value(v->name, init, t);
         }
         return;
@@ -267,8 +365,15 @@ inline void exec_stmt(Env& env, const ast::Stmt& s, FunctionTable& functions) {
 
     // Return
     if (auto* r = dynamic_cast<const ReturnStmt*>(&s)) {
-        Value v = r->value ? eval_expr(env, *r->value, functions) : Value{0};
-        throw ReturnSignal{v};
+        ReturnSignal rs;
+        if (r->value) {
+            rs.has_value = true;
+            rs.value = eval_expr(env, *r->value, functions);
+        } else {
+            rs.has_value = false;
+            rs.value = Value{0};
+        }
+        throw rs;
     }
 
     throw std::runtime_error("unknown statement");
@@ -288,16 +393,131 @@ inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions) {
     if (auto* v = dynamic_cast<const VarExpr*>(&e))
         return env.read_value(v->name);
 
-    // Zuweisung
+    // Unär
+    if (auto* u = dynamic_cast<const UnaryExpr*>(&e)) {
+        Value v = eval_expr(env, *u->expr, functions);
+        if (u->op == UnaryExpr::Op::Neg) {
+            return Value{ -expect_int(v, "unary -") };
+        }
+        if (u->op == UnaryExpr::Op::Not) {
+            return Value{ !expect_bool(v, "unary !") };
+        }
+        throw std::runtime_error("unknown unary operator");
+    }
+
+    // Binär
+    if (auto* b = dynamic_cast<const BinaryExpr*>(&e)) {
+        // Short-circuit fuer && / ||
+        if (b->op == BinaryExpr::Op::AndAnd) {
+            bool left = to_bool_like_cpp(eval_expr(env, *b->left, functions));
+            if (!left) return Value{false};
+            bool right = to_bool_like_cpp(eval_expr(env, *b->right, functions));
+            return Value{right};
+        }
+        if (b->op == BinaryExpr::Op::OrOr) {
+            bool left = to_bool_like_cpp(eval_expr(env, *b->left, functions));
+            if (left) return Value{true};
+            bool right = to_bool_like_cpp(eval_expr(env, *b->right, functions));
+            return Value{right};
+        }
+
+        Value lv = eval_expr(env, *b->left, functions);
+        Value rv = eval_expr(env, *b->right, functions);
+
+        switch (b->op) {
+            case BinaryExpr::Op::Add: return Value{ expect_int(lv, "+") + expect_int(rv, "+") };
+            case BinaryExpr::Op::Sub: return Value{ expect_int(lv, "-") - expect_int(rv, "-") };
+            case BinaryExpr::Op::Mul: return Value{ expect_int(lv, "*") * expect_int(rv, "*") };
+            case BinaryExpr::Op::Div: {
+                int r = expect_int(rv, "/");
+                if (r == 0) throw std::runtime_error("runtime error: division by zero");
+                return Value{ expect_int(lv, "/") / r };
+            }
+            case BinaryExpr::Op::Mod: {
+                int r = expect_int(rv, "%");
+                if (r == 0) throw std::runtime_error("runtime error: modulo by zero");
+                return Value{ expect_int(lv, "%") % r };
+            }
+            case BinaryExpr::Op::Lt: {
+                if (auto* li = std::get_if<int>(&lv)) {
+                    return Value{ *li < expect_int(rv, "<") };
+                }
+                if (auto* lc = std::get_if<char>(&lv)) {
+                    auto* rc = std::get_if<char>(&rv);
+                    if (!rc) throw std::runtime_error("type error: expected char in <");
+                    return Value{ *lc < *rc };
+                }
+                throw std::runtime_error("type error: invalid operands for <");
+            }
+            case BinaryExpr::Op::Le: {
+                if (auto* li = std::get_if<int>(&lv)) {
+                    return Value{ *li <= expect_int(rv, "<=") };
+                }
+                if (auto* lc = std::get_if<char>(&lv)) {
+                    auto* rc = std::get_if<char>(&rv);
+                    if (!rc) throw std::runtime_error("type error: expected char in <=");
+                    return Value{ *lc <= *rc };
+                }
+                throw std::runtime_error("type error: invalid operands for <=");
+            }
+            case BinaryExpr::Op::Gt: {
+                if (auto* li = std::get_if<int>(&lv)) {
+                    return Value{ *li > expect_int(rv, ">") };
+                }
+                if (auto* lc = std::get_if<char>(&lv)) {
+                    auto* rc = std::get_if<char>(&rv);
+                    if (!rc) throw std::runtime_error("type error: expected char in >");
+                    return Value{ *lc > *rc };
+                }
+                throw std::runtime_error("type error: invalid operands for >");
+            }
+            case BinaryExpr::Op::Ge: {
+                if (auto* li = std::get_if<int>(&lv)) {
+                    return Value{ *li >= expect_int(rv, ">=") };
+                }
+                if (auto* lc = std::get_if<char>(&lv)) {
+                    auto* rc = std::get_if<char>(&rv);
+                    if (!rc) throw std::runtime_error("type error: expected char in >=");
+                    return Value{ *lc >= *rc };
+                }
+                throw std::runtime_error("type error: invalid operands for >=");
+            }
+            case BinaryExpr::Op::Eq: {
+                if (lv.index() != rv.index()) throw std::runtime_error("type error: == requires same types");
+                if (auto* li = std::get_if<int>(&lv)) return Value{ *li == std::get<int>(rv) };
+                if (auto* lb = std::get_if<bool>(&lv)) return Value{ *lb == std::get<bool>(rv) };
+                if (auto* lc = std::get_if<char>(&lv)) return Value{ *lc == std::get<char>(rv) };
+                if (auto* ls = std::get_if<std::string>(&lv)) return Value{ *ls == std::get<std::string>(rv) };
+                throw std::runtime_error("type error: unsupported ==");
+            }
+            case BinaryExpr::Op::Ne: {
+                if (lv.index() != rv.index()) throw std::runtime_error("type error: != requires same types");
+                if (auto* li = std::get_if<int>(&lv)) return Value{ *li != std::get<int>(rv) };
+                if (auto* lb = std::get_if<bool>(&lv)) return Value{ *lb != std::get<bool>(rv) };
+                if (auto* lc = std::get_if<char>(&lv)) return Value{ *lc != std::get<char>(rv) };
+                if (auto* ls = std::get_if<std::string>(&lv)) return Value{ *ls != std::get<std::string>(rv) };
+                throw std::runtime_error("type error: unsupported !=");
+            }
+            default:
+                break;
+        }
+    }
+
+    // Zuweisung (slicing-aware)
     if (auto* a = dynamic_cast<const AssignExpr*>(&e)) {
         Value rhs = eval_expr(env, *a->value, functions);
-        env.assign_value(a->name, rhs);
+        assign_value_slicing_aware(env, a->name, rhs, functions);
         return rhs;
     }
 
     // Feldzugriff / Feldzuweisung
     if (auto* fa = dynamic_cast<const FieldAssignExpr*>(&e)) {
-        LValue lv = eval_lvalue(env, e, functions);
+        // object.f = rhs
+        Value objv = eval_expr(env, *fa->object, functions);
+        auto* pobj = std::get_if<ObjectPtr>(&objv);
+        if (!pobj || !*pobj)
+            throw std::runtime_error("field assignment on non-object");
+        LValue lv = LValue::field_of(*pobj, fa->field);
         Value rhs = eval_expr(env, *fa->value, functions);
         env.write_lvalue(lv, rhs);
         return rhs;
@@ -306,6 +526,129 @@ inline Value eval_expr(Env& env, const ast::Expr& e, FunctionTable& functions) {
     if (dynamic_cast<const MemberAccessExpr*>(&e)) {
         LValue lv = eval_lvalue(env, e, functions);
         return env.read_lvalue(lv);
+    }
+
+    // Funktionsaufruf
+    if (auto* c = dynamic_cast<const CallExpr*>(&e)) {
+        std::vector<Value> arg_vals;
+        std::vector<LValue> arg_lvals;
+        std::vector<ast::Type> arg_types;
+        std::vector<bool> arg_is_lv;
+
+        arg_vals.reserve(c->args.size());
+        arg_lvals.reserve(c->args.size());
+        arg_types.reserve(c->args.size());
+        arg_is_lv.reserve(c->args.size());
+
+        for (const auto& ap : c->args) {
+            bool islv = is_lvalue_expr(*ap);
+            arg_is_lv.push_back(islv);
+
+            Value v = eval_expr(env, *ap, functions);
+            arg_vals.push_back(v);
+            arg_types.push_back(type_of_value(v));
+
+            if (islv) arg_lvals.push_back(eval_lvalue(env, *ap, functions));
+            else arg_lvals.push_back(LValue{});
+        }
+
+        // builtins
+        if (c->callee == "print_int" || c->callee == "print_bool" ||
+            c->callee == "print_char" || c->callee == "print_string") {
+            return call_builtin(c->callee, arg_vals);
+        }
+
+        ast::FunctionDef& f = functions.resolve(c->callee, arg_types, arg_is_lv);
+        return call_function(env, f, arg_vals, arg_lvals, functions);
+    }
+
+    // Konstruktion: T(args)
+    if (auto* ce = dynamic_cast<const ConstructExpr*>(&e)) {
+        std::vector<Value> arg_vals;
+        std::vector<LValue> arg_lvals;
+        std::vector<ast::Type> arg_types;
+        std::vector<bool> arg_is_lv;
+
+        for (const auto& ap : ce->args) {
+            bool islv = is_lvalue_expr(*ap);
+            arg_is_lv.push_back(islv);
+
+            Value v = eval_expr(env, *ap, functions);
+            arg_vals.push_back(v);
+            arg_types.push_back(type_of_value(v));
+
+            if (islv) arg_lvals.push_back(eval_lvalue(env, *ap, functions));
+            else arg_lvals.push_back(LValue{});
+        }
+
+        ObjectPtr obj = allocate_object_with_default_fields(ce->class_name, functions);
+
+        try {
+            const ast::ConstructorDef& ctor = functions.class_rt.resolve_ctor(ce->class_name, arg_types, arg_is_lv);
+            run_ctor_chain(env, obj, ce->class_name, ctor, arg_vals, arg_lvals, functions);
+        } catch (const std::runtime_error& ex) {
+            // Impliziter Copy-Ctor: T(x) wobei x ein Objekt ist (auch D->B mit Slicing)
+            if (ce->args.size() == 1) {
+                if (auto* src_obj = std::get_if<ObjectPtr>(&arg_vals[0])) {
+                    if (*src_obj) {
+                        Value copied = copy_class_value_for_static_type(arg_vals[0], ast::Type::Class(ce->class_name, false), functions);
+                        return copied;
+                    }
+                }
+            }
+            throw; // echter Konstruktor-Fehler
+        }
+
+        return Value{obj};
+    }
+
+    // Methodenaufruf: obj.m(args)
+    if (auto* mc = dynamic_cast<const MethodCallExpr*>(&e)) {
+        // Objekt auswerten
+        Value objv = eval_expr(env, *mc->object, functions);
+        auto* pobj = std::get_if<ObjectPtr>(&objv);
+        if (!pobj || !*pobj)
+            throw std::runtime_error("method call on non-object");
+        ObjectPtr self = *pobj;
+
+        // Argumente
+        std::vector<Value> arg_vals;
+        std::vector<LValue> arg_lvals;
+        std::vector<ast::Type> arg_types;
+        std::vector<bool> arg_is_lv;
+
+        for (const auto& ap : mc->args) {
+            bool islv = is_lvalue_expr(*ap);
+            arg_is_lv.push_back(islv);
+
+            Value v = eval_expr(env, *ap, functions);
+            arg_vals.push_back(v);
+            arg_types.push_back(type_of_value(v));
+
+            if (islv) arg_lvals.push_back(eval_lvalue(env, *ap, functions));
+            else arg_lvals.push_back(LValue{});
+        }
+
+        // Statischer Typ + call_via_ref bestimmen (Polymorphie nur ueber Referenzen)
+        std::string static_class = self->dynamic_class;
+        bool call_via_ref = false;
+
+        if (auto* ve = dynamic_cast<const VarExpr*>(mc->object.get())) {
+            ast::Type st = env.static_type_of(ve->name);
+            if (st.base == ast::Type::Base::Class) static_class = st.class_name;
+            call_via_ref = env.is_ref_var(ve->name);
+        }
+
+        const ast::MethodDef& target = functions.class_rt.resolve_method(
+            static_class,
+            self->dynamic_class,
+            mc->method,
+            arg_types,
+            arg_is_lv,
+            call_via_ref
+        );
+
+        return call_method(env, self, static_class, target, arg_vals, arg_lvals, functions);
     }
 
     throw std::runtime_error("unknown expression");

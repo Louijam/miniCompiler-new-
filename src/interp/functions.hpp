@@ -62,11 +62,11 @@ struct FunctionTable {
         class_rt.build(p);
     }
 
-    // Overload-Auflösung fuer freie Funktionen:
+    // Overload-Auflösung fuer freie Funktionen (Projekt-Semantik):
     // - exakte Übereinstimmung der Basistypen
     // - Referenzparameter erfordern LValue-Argumente
-    // - best_score = Anzahl passender Referenzen
-    // - Ambiguität bei gleichem Score
+    // - KEIN "best match" wie in echtem C++ (keine Präferenzregeln)
+    // - wenn mehrere Overloads passen => Fehler (ambiguous)
     ast::FunctionDef& resolve(const std::string& name,
                               const std::vector<ast::Type>& arg_base_types,
                               const std::vector<bool>& arg_is_lvalue) {
@@ -76,13 +76,11 @@ struct FunctionTable {
         }
 
         ast::FunctionDef* best = nullptr;
-        int best_score = -1;
 
         for (auto* f : it->second) {
             if (f->params.size() != arg_base_types.size()) continue;
 
             bool ok = true;
-            int score = 0;
 
             for (size_t i = 0; i < arg_base_types.size(); ++i) {
                 ast::Type at = base_type(arg_base_types[i]);
@@ -94,16 +92,14 @@ struct FunctionTable {
                 // Referenzparameter: Argument muss LValue sein
                 if (pt.is_ref) {
                     if (!arg_is_lvalue[i]) { ok = false; break; }
-                    score += 1;
                 }
             }
 
             if (!ok) continue;
 
-            if (score > best_score) {
-                best_score = score;
+            if (!best) {
                 best = f;
-            } else if (score == best_score) {
+            } else {
                 throw std::runtime_error("ambiguous overload: " + name);
             }
         }

@@ -141,7 +141,11 @@ struct Env {
         if (!lv.obj)
             throw std::runtime_error("null object for field lvalue");
 
-        lv.obj->fields[lv.field] = std::move(v);
+        auto it = lv.obj->fields.find(lv.field);
+        if (it == lv.obj->fields.end())
+            throw std::runtime_error("unknown field at runtime: " + lv.field);
+
+        it->second = std::move(v);
     }
 
     // Liest aus einem LValue (Variable oder Objektfeld)

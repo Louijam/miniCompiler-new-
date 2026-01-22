@@ -6,6 +6,8 @@
 #include <stdexcept> // std::runtime_error
 #include <string>    // std::string
 
+#include <unistd.h>  // isatty
+
 #include "repl/repl.hpp"        // interactive REPL driver
 #include "repl/preprocess.hpp"  // strip_preprocessor_lines()
 
@@ -97,13 +99,18 @@ int main(int argc, char** argv) {
 
                 // Parse the whole file into a Program and build runtime tables from it
                 global_program = parser::Parser::parse_source(src);
+
                 functions.add_program(global_program);
 
-                // If the file defines main(), run it once before entering REPL
+                int exit_code = 0;
+
+                // If the file defines main(), run it once
                 if (has_main(global_program)) {
-                    int code = run_main_if_present(session_env, functions);
-                    if (code != 0) std::cerr << "main() returned " << code << "\n";
+                    exit_code = run_main_if_present(session_env, functions);
                 }
+
+                // In CI/tests stdin ist typischerweise kein TTY -> keine REPL starten
+                if (!isatty(0)) return exit_code;
             }
         } else {
             // No file: start with an empty program, but still build the runtime tables

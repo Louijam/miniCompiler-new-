@@ -6,6 +6,8 @@
 #include <unordered_map>    // std::unordered_map
 #include <memory>           // std::shared_ptr
 
+#include "../ast/type.hpp"  // ast::Type (fuer Slicing)
+
 namespace interp {
 
 struct Object;                              // Forward-Deklaration fuer Objekt-Typ
@@ -20,6 +22,16 @@ using Value = std::variant<bool, int, char, std::string, ObjectPtr>;
 struct Object {
     std::string dynamic_class;                    // Dynamischer (runtime) Klassenname
     std::unordered_map<std::string, Value> fields; // Feldspeicher: Feldname -> Wert
+
+    // Entfernt alle Felder, die nicht in allowed vorkommen (Object-Slicing)
+    void slice_to(const std::string& static_class,
+                  const std::unordered_map<std::string, ast::Type>& allowed) {
+        (void)static_class;
+        for (auto it = fields.begin(); it != fields.end(); ) {
+            if (allowed.find(it->first) == allowed.end()) it = fields.erase(it);
+            else ++it;
+        }
+    }
 };
 
 // Debug-/Ausgabe-Hilfsfunktion fuer Laufzeitwerte

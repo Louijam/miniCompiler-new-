@@ -12,6 +12,21 @@
 
 namespace interp {
 
+// Tiefe Kopie fuer Values (Klassenwerte haben Wertsemantik, keine Pointer-Aliasing)
+inline Value deep_copy_value(const Value& v) {
+    if (auto* o = std::get_if<ObjectPtr>(&v)) {
+        if (!*o) throw std::runtime_error("null object value");
+
+        ObjectPtr dst = std::make_shared<Object>();
+        dst->dynamic_class = (*o)->dynamic_class;
+        for (const auto& [k, vv] : (*o)->fields) {
+            dst->fields[k] = deep_copy_value(vv);
+        }
+        return Value{dst};
+    }
+    return v; // primitives: copy by value
+}
+
 // Weist einem benannten Wert (keinem Feld!) einen neuen Wert zu
 // Berücksichtigt korrektes Object-Slicing bei Klassenwerten:
 //
@@ -51,8 +66,10 @@ inline void assign_value_slicing_aware(Env& env,
 
             // Gleicher Typ: komplette Kopie (keine Slicing-Regel notwendig)
             if (lhs_static == rhs_dynamic) {
+                Value copied = deep_copy_value(rhs);
+                auto* rhs_copy = std::get_if<ObjectPtr>(&copied);
                 (*lhs_obj)->dynamic_class = rhs_dynamic;
-                (*lhs_obj)->fields = (*rhs_obj)->fields;
+                (*lhs_obj)->fields = (*rhs_copy)->fields;
                 return;
             }
 
@@ -60,8 +77,10 @@ inline void assign_value_slicing_aware(Env& env,
             // Nur Felder der statischen LHS-Klasse behalten
             const auto& lhs_ci = functions.class_rt.get(lhs_static);
 
-            // Erst alles kopieren ...
-            (*lhs_obj)->fields = (*rhs_obj)->fields;
+            // Erst alles kopieren (deep copy) ...
+            Value copied = deep_copy_value(rhs);
+            auto* rhs_copy = std::get_if<ObjectPtr>(&copied);
+            (*lhs_obj)->fields = (*rhs_copy)->fields;
             // ... dann auf statische LHS-Klasse zuschneiden
             (*lhs_obj)->slice_to(lhs_static, lhs_ci.merged_fields);
             // Dynamischen Typ auf statischen Typ setzen

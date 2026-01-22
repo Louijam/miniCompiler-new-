@@ -209,14 +209,12 @@ struct ClassRuntime {
         }
 
         const ast::ConstructorDef* best = nullptr;
-        int best_score = -1;
 
         for (const auto& cti : ci.ctors) {
             const auto& ctor = *cti.def;
             if (ctor.params.size() != arg_types.size()) continue;
 
             bool ok = true;
-            int score = 0;
 
             for (size_t i = 0; i < arg_types.size(); ++i) {
                 ast::Type at = base_type(arg_types[i]);
@@ -225,18 +223,13 @@ struct ClassRuntime {
                 if (base_type(pt) != at) { ok = false; break; }
                 if (pt.is_ref) {
                     if (!arg_is_lvalue[i]) { ok = false; break; }
-                    score += 1;
                 }
             }
 
             if (!ok) continue;
 
-            if (score > best_score) {
-                best_score = score;
-                best = &ctor;
-            } else if (score == best_score) {
-                throw std::runtime_error("runtime error: ambiguous constructor call: " + class_name);
-            }
+            if (!best) best = &ctor;
+            else throw std::runtime_error("runtime error: ambiguous constructor call: " + class_name);
         }
 
         if (!best)
@@ -256,14 +249,12 @@ struct ClassRuntime {
             throw std::runtime_error("runtime error: no matching overload: " + method);
 
         const ast::MethodDef* best = nullptr;
-        int best_score = -1;
 
         for (const auto& mi : it->second) {
             const auto& m = *mi.def;
             if (m.params.size() != arg_types.size()) continue;
 
             bool ok = true;
-            int score = 0;
 
             for (size_t i = 0; i < arg_types.size(); ++i) {
                 ast::Type at = base_type(arg_types[i]);
@@ -272,18 +263,13 @@ struct ClassRuntime {
                 if (base_type(pt) != at) { ok = false; break; }
                 if (pt.is_ref) {
                     if (!arg_is_lvalue[i]) { ok = false; break; }
-                    score += 1;
                 }
             }
 
             if (!ok) continue;
 
-            if (score > best_score) {
-                best_score = score;
-                best = &m;
-            } else if (score == best_score) {
-                throw std::runtime_error("runtime error: ambiguous overload: " + method);
-            }
+            if (!best) best = &m;
+            else throw std::runtime_error("runtime error: ambiguous overload: " + method);
         }
 
         if (!best)
